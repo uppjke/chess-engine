@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Blitz Chess</title>
+  <link rel="stylesheet" href="styles.css?v=4" />
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="title">Blitz Chess</div>
+        <div class="subtitle">Локальный движок • Быстрые партии • Редактор позиций</div>
+      </div>
+      <div class="status-group">
+        <div id="status" class="status-chip" data-state="off">Отключено</div>
+        <div id="turnStatus" class="status-chip">Ход: —</div>
+        <div id="engineStatus" class="status-chip">Движок: Белые</div>
+        <div id="gameStatus" class="status-chip" data-state="ok">ОК</div>
+      </div>
+    </header>
+
+    <div class="app">
+      <div class="board-panel">
+        <div class="card board-card">
+          <div id="board" class="board"></div>
+        </div>
+        <div class="card action-panel">
+          <div class="panel-header">
+            <div class="panel-title">Управление</div>
+            <div class="panel-subtitle">Основные действия партии</div>
+          </div>
+          <div class="controls action-grid">
+            <button id="resetBtn">Сброс</button>
+            <button id="undoBtn">Откат</button>
+            <button id="redoBtn">Вперед</button>
+            <button id="flipBtn">Перевернуть</button>
+            <button id="editBtn">Редактор: выкл</button>
+            <button id="engineMoveBtn" class="primary">Ход движка</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="side-panel">
+        <div class="card">
+          <div class="panel-header">
+            <div class="panel-title">Игра</div>
+            <div class="panel-subtitle">Настройки партии</div>
+          </div>
+          <div class="field">
+            <label for="humanSide">Движок играет</label>
+            <select id="humanSide">
+              <option value="w">Белые</option>
+              <option value="b">Чёрные</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="moveTime">Movetime (мс)</label>
+            <input id="moveTime" type="number" value="500" min="50" max="5000" step="50" />
+          </div>
+          <label class="toggle switch">
+            <input id="autoMove" type="checkbox" />
+            <span class="slider"></span>
+            <span class="toggle-label">Автоход</span>
+          </label>
+        </div>
+
+        <div class="card editor-card">
+          <div class="panel-header">
+            <div class="panel-title">Редактор позиции</div>
+            <div class="panel-subtitle">Расстановка фигур и рокировки</div>
+          </div>
+          <div id="palette" class="palette"></div>
+          <div class="editor-footer">
+            <div class="field">
+              <label for="sideToMove">Очередь хода</label>
+              <select id="sideToMove">
+                <option value="w">Белые</option>
+                <option value="b">Чёрные</option>
+              </select>
+            </div>
+            <div class="castling">
+              <label class="pill"><input type="checkbox" id="castleK" checked /> K</label>
+              <label class="pill"><input type="checkbox" id="castleQ" checked /> Q</label>
+              <label class="pill"><input type="checkbox" id="castlek" checked /> k</label>
+              <label class="pill"><input type="checkbox" id="castleq" checked /> q</label>
+            </div>
+            <button id="applyEditBtn" class="primary">Применить позицию</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="history-panel">
+        <div class="card">
+          <div class="panel-header">
+            <div class="panel-title">Партия</div>
+            <div class="panel-subtitle">История ходов</div>
+          </div>
+          <div id="moveList" class="move-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js?v=9"></script>
+</body>
+</html>

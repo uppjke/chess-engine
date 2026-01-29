@@ -1,0 +1,22 @@
+# Build outputs
+engine/build/
+*.exe
+*.obj
+*.o
+
+# Node modules
+bridge/node_modules/
+node_modules/
+
+# IDE
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
