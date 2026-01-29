@@ -11,8 +11,10 @@ const __dirname = path.dirname(__filename);
 const uiDir = path.join(__dirname, '..', 'ui');
 const port = 3000;
 
-const defaultEngine = path.join(__dirname, '..', 'engine', 'build', 'blitz_engine.exe');
-const releaseEngine = path.join(__dirname, '..', 'engine', 'build', 'Release', 'blitz_engine.exe');
+const isWindows = process.platform === 'win32';
+const ext = isWindows ? '.exe' : '';
+const defaultEngine = path.join(__dirname, '..', 'engine', 'build', `blitz_engine${ext}`);
+const releaseEngine = path.join(__dirname, '..', 'engine', 'build', 'Release', `blitz_engine${ext}`);
 const enginePath = process.env.CHESS_ENGINE_PATH || (fs.existsSync(releaseEngine) ? releaseEngine : defaultEngine);
 let engine = null;
 let engineReady = false;
@@ -21,7 +23,9 @@ let engineQueue = [];
 function startEngine() {
   const env = {
     ...process.env,
-    PATH: `C:\\msys64\\mingw64\\bin;${process.env.PATH || ''}`
+    PATH: isWindows 
+      ? `C:\\msys64\\mingw64\\bin;${process.env.PATH || ''}`
+      : process.env.PATH
   };
   engine = spawn(enginePath, [], { stdio: ['pipe', 'pipe', 'pipe'], env });
   engine.stdout.setEncoding('utf8');
