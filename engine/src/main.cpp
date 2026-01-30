@@ -436,6 +436,46 @@ private:
             }
         }
         
+        // === CRITICAL: Never trade queen for minor piece ===
+        {
+            int pt2 = piece_type((Piece)m.moved);
+            if (pt2 == WQ && m.captured != EMPTY) {
+                int cap_pt = piece_type((Piece)m.captured);
+                // Queen capturing bishop, knight or pawn
+                if (cap_pt == WB || cap_pt == WN || cap_pt == WP) {
+                    // Check if queen will be captured after this
+                    Side mover = (m.moved <= WK) ? WHITE : BLACK;
+                    Side opp = (mover == WHITE) ? BLACK : WHITE;
+                    if (is_square_attacked(m.to, opp)) {
+                        // We're trading queen for minor piece = TERRIBLE
+                        score -= 600; // Huge penalty
+                    }
+                }
+            }
+            
+            // === CRITICAL: Never move king to center of board ===
+            if (pt2 == WK) {
+                int to_rank = rank_of(m.to);
+                int to_file = file_of(m.to);
+                
+                // King moving to ranks 2-5 (center) = disaster
+                if (to_rank >= 2 && to_rank <= 5) {
+                    score -= 500; // Massive penalty
+                    if (to_file >= 2 && to_file <= 5) {
+                        score -= 300; // Even worse - center files
+                    }
+                }
+                // King moving without castling in opening
+                if (!m.is_castle && pos.fullmove_number <= 15) {
+                    int from_rank = rank_of(m.from);
+                    // King leaving back rank (not castling)
+                    if ((from_rank == 0 && to_rank > 0) || (from_rank == 7 && to_rank < 7)) {
+                        score -= 400;
+                    }
+                }
+            }
+        }
+        
         return score;
     }
 
@@ -472,6 +512,123 @@ private:
         if (attacked && !defended) return gain - cost;
         if (attacked && defended) return gain - (cost / 2);
         return gain;
+    }
+    
+    // === FORK DETECTION ===
+    // Check if a knight on 'sq' attacks both king and queen/rook
+    bool is_knight_fork_threat(int knight_sq, Side attacker) {
+        int king_target = (attacker == WHITE) ? BK : WK;
+        int queen_target = (attacker == WHITE) ? BQ : WQ;
+        int rook_target = (attacker == WHITE) ? BR : WR;
+        
+        bool attacks_king = false;
+        bool attacks_queen = false;
+        bool attacks_rook = false;
+        
+        static const int knight_offsets[8][2] = {{1,2},{2,1},{2,-1},{1,-2},{-1,-2},{-2,-1},{-2,1},{-1,2}};
+        int f = file_of(knight_sq);
+        int r = rank_of(knight_sq);
+        
+        for (auto &o : knight_offsets) {
+            int nf = f + o[0];
+            int nr = r + o[1];
+            if (nf < 0 || nf > 7 || nr < 0 || nr > 7) continue;
+            int target_sq = make_sq(nf, nr);
+            int p = pos.board[target_sq];
+            if (p == king_target) attacks_king = true;
+            if (p == queen_target) attacks_queen = true;
+            if (p == rook_target) attacks_rook = true;
+        }
+        
+        return attacks_king && (attacks_queen || attacks_rook);
+    }
+    
+    // Find all knight fork threats for a side
+    int count_knight_fork_threats(Side attacker) {
+        int forks = 0;
+        int knight_piece = (attacker == WHITE) ? WN : BN;
+        
+        for (int sq = 0; sq < 64; ++sq) {
+            if (pos.board[sq] == knight_piece) {
+                // Check all squares this knight can move to
+                static const int knight_offsets[8][2] = {{1,2},{2,1},{2,-1},{1,-2},{-1,-2},{-2,-1},{-2,1},{-1,2}};
+                int f = file_of(sq);
+                int r = rank_of(sq);
+                
+                for (auto &o : knight_offsets) {
+                    int nf = f + o[0];
+                    int nr = r + o[1];
+                    if (nf < 0 || nf > 7 || nr < 0 || nr > 7) continue;
+                    int target_sq = make_sq(nf, nr);
+                    int target = pos.board[target_sq];
+                    // Can knight move here?
+                    if (target == EMPTY || 
+                        (attacker == WHITE && is_black((Piece)target)) ||
+                        (attacker == BLACK && is_white((Piece)target))) {
+                        // Simulate knight on this square and check for fork
+                        int orig = pos.board[target_sq];
+                        pos.board[sq] = EMPTY;
+                        pos.board[target_sq] = knight_piece;
+                        if (is_knight_fork_threat(target_sq, attacker)) {
+                            forks++;
+                        }
+                        pos.board[target_sq] = orig;
+                        pos.board[sq] = knight_piece;
+                    }
+                }
+            }
+        }
+        return forks;
+    }
+    
+    // Evaluate hanging pieces (pieces that are attacked but not defended)
+    int evaluate_hanging_pieces() {
+        int score = 0;
+        
+        for (int sq = 0; sq < 64; ++sq) {
+            int p = pos.board[sq];
+            if (p == EMPTY) continue;
+            
+            bool is_white_piece = is_white((Piece)p);
+            Side owner = is_white_piece ? WHITE : BLACK;
+            Side attacker = is_white_piece ? BLACK : WHITE;
+            
+            // Skip pawns and kings
+            int pt = piece_type((Piece)p);
+            if (pt == WP || pt == WK) continue;
+            
+            bool attacked = is_square_attacked(sq, attacker);
+            bool defended = is_square_attacked(sq, owner);
+            
+            if (attacked && !defended) {
+                // Hanging piece!
+                int val = piece_value(p);
+                if (is_white_piece) {
+                    score -= val / 2; // White has hanging piece = bad for white
+                } else {
+                    score += val / 2; // Black has hanging piece = good for white
+                }
+            }
+        }
+        return score;
+    }
+    
+    // Check if opponent has a winning tactical threat (fork, hanging piece capture)
+    int evaluate_threats() {
+        int score = 0;
+        
+        // Count fork threats
+        int white_forks = count_knight_fork_threats(WHITE);
+        int black_forks = count_knight_fork_threats(BLACK);
+        
+        // Fork threat is VERY dangerous
+        score += white_forks * 300;
+        score -= black_forks * 300;
+        
+        // Evaluate hanging pieces
+        score += evaluate_hanging_pieces();
+        
+        return score;
     }
 
     void init_tables() {
@@ -1104,6 +1261,10 @@ private:
         int development = evaluate_development_quality();
         score += development;
         
+        // === TACTICAL THREATS (forks, hanging pieces) ===
+        int threats = evaluate_threats();
+        score += threats;
+        
         return (pos.side_to_move == WHITE) ? score : -score;
     }
     
@@ -1116,6 +1277,54 @@ private:
         for (int sq = 0; sq < 64; ++sq) {
             if (pos.board[sq] == WK) wk_sq = sq;
             if (pos.board[sq] == BK) bk_sq = sq;
+        }
+        
+        // === CRITICAL: King in the center of the board is DEADLY ===
+        // King should be on rank 0/1 for white or rank 6/7 for black
+        // King in the middle (ranks 2-5) is extremely dangerous
+        
+        if (wk_sq != -1) {
+            int wk_rank = rank_of(wk_sq);
+            int wk_file = file_of(wk_sq);
+            
+            // White king on ranks 2-5 (middle of board) = disaster
+            if (wk_rank >= 2 && wk_rank <= 5) {
+                safety -= 300; // Huge penalty
+                // Even worse if in center files
+                if (wk_file >= 2 && wk_file <= 5) {
+                    safety -= 200; // King in center = death
+                }
+                // Check if king is attacked
+                if (is_square_attacked(wk_sq, BLACK)) {
+                    safety -= 150;
+                }
+            }
+            // King on rank 1 but moved from e1 (not castled) - minor penalty
+            else if (wk_rank == 0 && wk_file != 6 && wk_file != 2 && wk_file != 4) {
+                safety -= 50; // King walked but didn't castle
+            }
+        }
+        
+        if (bk_sq != -1) {
+            int bk_rank = rank_of(bk_sq);
+            int bk_file = file_of(bk_sq);
+            
+            // Black king on ranks 2-5 (middle of board) = disaster  
+            if (bk_rank >= 2 && bk_rank <= 5) {
+                safety += 300; // Huge bonus for white (black king exposed)
+                // Even worse if in center files
+                if (bk_file >= 2 && bk_file <= 5) {
+                    safety += 200;
+                }
+                // Check if king is attacked
+                if (is_square_attacked(bk_sq, WHITE)) {
+                    safety += 150;
+                }
+            }
+            // King on rank 7 but moved from e8 (not castled) - minor penalty
+            else if (bk_rank == 7 && bk_file != 6 && bk_file != 2 && bk_file != 4) {
+                safety += 50;
+            }
         }
         
         // === F7 weakness for Black ===
@@ -1284,9 +1493,19 @@ private:
             bool is_repeat = is_repeat_piece_move(m);
             
             Undo u = make_move(m);
+            
+            // === CHECK FOR OPPONENT FORK THREATS AFTER OUR MOVE ===
+            Side opponent = pos.side_to_move; // After make_move, it's opponent's turn
+            int opp_forks = count_knight_fork_threats(opponent);
+            
             Move child_best;
             int score = -alpha_beta(depth - 1, -beta, -alpha, child_best);
             unmake_move(m, u);
+            
+            // Heavy penalty if we allow a fork
+            if (opp_forks > 0) {
+                score -= 400 * opp_forks;
+            }
             
             // Apply penalties AFTER unmake but using pre-computed flags
             if (is_reverse) {
@@ -1310,6 +1529,31 @@ private:
                     }
                 }
             }
+            
+            // === CRITICAL: Penalize king moves to center ===
+            if (pt == WK) {
+                int to_rank = rank_of(m.to);
+                int to_file = file_of(m.to);
+                if (to_rank >= 2 && to_rank <= 5) {
+                    score -= 500;
+                    if (to_file >= 2 && to_file <= 5) {
+                        score -= 300;
+                    }
+                }
+            }
+            
+            // === CRITICAL: Penalize trading queen for minor piece ===
+            if (pt == WQ && m.captured != EMPTY) {
+                int cap_pt = piece_type((Piece)m.captured);
+                if (cap_pt == WB || cap_pt == WN || cap_pt == WP) {
+                    Side mover = (m.moved <= WK) ? WHITE : BLACK;
+                    Side opp = (mover == WHITE) ? BLACK : WHITE;
+                    if (is_square_attacked(m.to, opp)) {
+                        score -= 600;
+                    }
+                }
+            }
+            
             if (stop_search) return 0;
             if (score > best_score) {
                 best_score = score;
