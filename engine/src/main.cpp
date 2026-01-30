@@ -291,6 +291,36 @@ public:
             best_score = score;
             depth_reached = depth;
         }
+        
+        // === CRITICAL: Check if best move allows mate in 1 ===
+        if (best.from != -1 && !stop_search) {
+            Undo u = make_move(best);
+            if (opponent_has_mate_in_one()) {
+                // This move allows mate! Find alternative
+                unmake_move(best, u);
+                cerr << "info string WARNING: Best move allows mate in 1, finding alternative" << endl;
+                auto moves = generate_legal_moves();
+                Move safe_best;
+                int safe_score = -INF;
+                for (auto &m : moves) {
+                    Undo u2 = make_move(m);
+                    bool allows_mate = opponent_has_mate_in_one();
+                    Move child_best;
+                    int score = allows_mate ? -MATE_SCORE : -alpha_beta(3, -INF, INF, child_best);
+                    unmake_move(m, u2);
+                    if (score > safe_score) {
+                        safe_score = score;
+                        safe_best = m;
+                    }
+                }
+                if (safe_best.from != -1) {
+                    best = safe_best;
+                }
+            } else {
+                unmake_move(best, u);
+            }
+        }
+        
         if (best.from != -1 && !stop_search) {
             if (is_mate_trap(best, MATE_TRAP_PLIES)) {
                 auto moves = generate_legal_moves();
@@ -373,7 +403,23 @@ private:
     int move_score(const Move &m) const {
         int score = 0;
         if (m.captured != EMPTY) {
+            // Basic MVV-LVA
             score += 10 * piece_value(m.captured) - piece_value(m.moved);
+            
+            // === CRITICAL: Penalize capturing defended pieces with more valuable pieces ===
+            Side mover = (m.moved <= WK) ? WHITE : BLACK;
+            Side opp = (mover == WHITE) ? BLACK : WHITE;
+            
+            if (is_square_attacked(m.to, opp)) {
+                // Target square is defended
+                int our_value = piece_value(m.moved);
+                int their_value = piece_value(m.captured);
+                
+                if (our_value > their_value + 50) {
+                    // We're trading down badly (e.g., bishop for pawn)
+                    score -= (our_value - their_value);
+                }
+            }
         }
         if (m.promotion != EMPTY) {
             score += piece_value(m.promotion) + 800;
@@ -471,6 +517,30 @@ private:
                     // King leaving back rank (not castling)
                     if ((from_rank == 0 && to_rank > 0) || (from_rank == 7 && to_rank < 7)) {
                         score -= 400;
+                    }
+                }
+                
+                // === CRITICAL: Penalize king moves that expose to attack ===
+                // After castling, king should stay safe - don't walk into open files
+                Side mover = (m.moved <= WK) ? WHITE : BLACK;
+                Side opp = (mover == WHITE) ? BLACK : WHITE;
+                
+                // Check if destination is attacked or on open file
+                if (is_square_attacked(m.to, opp)) {
+                    score -= 300; // King walking into attack
+                }
+                
+                // Check if king is moving onto a file with enemy rooks/queens
+                for (int r = 0; r < 8; ++r) {
+                    int sq = make_sq(to_file, r);
+                    int p = pos.board[sq];
+                    if (p == EMPTY) continue;
+                    bool enemy_piece = (mover == WHITE) ? is_black((Piece)p) : is_white((Piece)p);
+                    if (enemy_piece) {
+                        int pt3 = piece_type((Piece)p);
+                        if (pt3 == WR || pt3 == WQ) {
+                            score -= 200; // King walking onto file with enemy heavy piece
+                        }
                     }
                 }
             }
@@ -896,6 +966,12 @@ private:
             if (mate) return true;
         }
         return false;
+    }
+    
+    // Check if the current side to move can mate us in one
+    bool opponent_has_mate_in_one() {
+        // Current side to move is the opponent (after we made our move)
+        return has_mate_in_one();
     }
 
     bool is_repetition() const {
@@ -1640,7 +1716,7 @@ int main() {
         } else if (line.rfind("position", 0) == 0) {
             engine.set_position_from_uci(line);
         } else if (line.rfind("go", 0) == 0) {
-            int depth = 8;
+            int depth = 10;
             int movetime = -1;
             int wtime = 300000, btime = 300000, winc = 0, binc = 0;
             stringstream ss(line);
