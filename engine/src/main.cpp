@@ -413,6 +413,29 @@ private:
                 score -= piece_value(m.moved) / 3;
             }
         }
+        
+        // === ANTI-GREED: Penalize grabbing distant pawns in opening ===
+        if (pos.fullmove_number <= 12 && m.captured != EMPTY) {
+            int pt = piece_type((Piece)m.moved);
+            int cap_pt = piece_type((Piece)m.captured);
+            
+            // Bishop or knight grabbing rook pawns (a or h file) = usually bad
+            if ((pt == WB || pt == WN) && cap_pt == WP) {
+                int to_file = file_of(m.to);
+                if (to_file == 0 || to_file == 7) {
+                    score -= 150; // Grabbing rook pawn loses tempo
+                }
+                // Especially bad: bishop going to a2/a7/h2/h7
+                if (pt == WB) {
+                    int to_rank = rank_of(m.to);
+                    if ((to_file == 0 && (to_rank == 1 || to_rank == 6)) ||
+                        (to_file == 7 && (to_rank == 1 || to_rank == 6))) {
+                        score -= 100; // Bishop trapped potential
+                    }
+                }
+            }
+        }
+        
         return score;
     }
 
@@ -1072,7 +1095,152 @@ private:
         }
 
         score += dev;
+        
+        // === KING SAFETY ===
+        int king_safety = evaluate_king_safety();
+        score += king_safety;
+        
+        // === DEVELOPMENT QUALITY ===
+        int development = evaluate_development_quality();
+        score += development;
+        
         return (pos.side_to_move == WHITE) ? score : -score;
+    }
+    
+    // Evaluate king safety - especially f7/f2 weakness
+    int evaluate_king_safety() {
+        int safety = 0;
+        
+        // Find kings
+        int wk_sq = -1, bk_sq = -1;
+        for (int sq = 0; sq < 64; ++sq) {
+            if (pos.board[sq] == WK) wk_sq = sq;
+            if (pos.board[sq] == BK) bk_sq = sq;
+        }
+        
+        // === F7 weakness for Black ===
+        int f7 = make_sq(5, 6); // f7
+        if (pos.board[f7] == BP) {
+            // f7 pawn is there, check if it's defended properly
+            // If king hasn't castled and f7 is under attack, big penalty
+            if (bk_sq == make_sq(4, 7)) { // King on e8 (hasn't castled)
+                if (is_square_attacked(f7, WHITE)) {
+                    safety += 80; // Bonus for white (black is weak)
+                }
+                // If knight on e7 blocks the king, penalty
+                if (pos.board[make_sq(4, 6)] == BN) {
+                    safety += 25; // Knight on e7 is awkward
+                }
+            }
+        } else if (pos.board[f7] == EMPTY) {
+            // f7 is open - very dangerous if king on e8
+            if (bk_sq == make_sq(4, 7)) {
+                safety += 60;
+            }
+        }
+        
+        // === F2 weakness for White ===
+        int f2 = make_sq(5, 1); // f2
+        if (pos.board[f2] == WP) {
+            if (wk_sq == make_sq(4, 0)) { // King on e1
+                if (is_square_attacked(f2, BLACK)) {
+                    safety -= 80;
+                }
+            }
+        } else if (pos.board[f2] == EMPTY) {
+            if (wk_sq == make_sq(4, 0)) {
+                safety -= 60;
+            }
+        }
+        
+        // === Penalty for king in center after move 8 ===
+        if (pos.fullmove_number > 8) {
+            if (wk_sq == make_sq(4, 0)) safety -= 40; // White king still on e1
+            if (bk_sq == make_sq(4, 7)) safety += 40; // Black king still on e8
+        }
+        
+        // === Check if queen can attack f7/f2 with support ===
+        // Detect Qxf7# patterns
+        int e5 = make_sq(4, 4);
+        if (pos.board[e5] == WP || is_square_attacked(e5, WHITE)) {
+            // White controls e5, diagonal to f7 is open
+            if (bk_sq == make_sq(4, 7) && pos.fullmove_number <= 15) {
+                safety += 30; // Black should be careful
+            }
+        }
+        
+        return safety;
+    }
+    
+    // Evaluate development quality - penalize bad piece placement
+    int evaluate_development_quality() {
+        int dev = 0;
+        
+        // === Penalize bishop on edge files in opening ===
+        if (pos.fullmove_number <= 12) {
+            for (int sq = 0; sq < 64; ++sq) {
+                int p = pos.board[sq];
+                int f = file_of(sq);
+                int r = rank_of(sq);
+                
+                // Bishop on a or h file = usually bad
+                if ((p == WB || p == BB) && (f == 0 || f == 7)) {
+                    if (p == WB) dev -= 35;
+                    else dev += 35;
+                }
+                
+                // Bishop on a2/b1 or a7/b8 = grabbing pawn, losing tempo
+                if (p == WB && (sq == make_sq(0, 1) || sq == make_sq(1, 0))) {
+                    dev -= 50; // Bad bishop position
+                }
+                if (p == BB && (sq == make_sq(0, 6) || sq == make_sq(1, 7))) {
+                    dev += 50;
+                }
+                // Black bishop on a2 = terrible, wasted tempo
+                if (p == BB && sq == make_sq(0, 1)) {
+                    dev += 80; // Bonus for white - black wasted tempo
+                }
+                if (p == WB && sq == make_sq(0, 6)) {
+                    dev -= 80;
+                }
+                
+                // Penalize pieces blocking central pawns
+                if (p == BN || p == BB) {
+                    // Knight or bishop on e7/d7 blocking pawns
+                    if (sq == make_sq(4, 6) && pos.board[make_sq(4, 4)] != BP) {
+                        dev += 20; // Piece on e7 blocking e-pawn
+                    }
+                    if (sq == make_sq(3, 6) && pos.board[make_sq(3, 4)] != BP) {
+                        dev += 20; // Piece on d7 blocking d-pawn
+                    }
+                }
+                if (p == WN || p == WB) {
+                    if (sq == make_sq(4, 1) && pos.board[make_sq(4, 3)] != WP) {
+                        dev -= 20;
+                    }
+                    if (sq == make_sq(3, 1) && pos.board[make_sq(3, 3)] != WP) {
+                        dev -= 20;
+                    }
+                }
+            }
+            
+            // === Penalize moving same piece twice in opening ===
+            // (Already handled in move_score, but reinforce here)
+            
+            // === Bonus for controlling center (d4, d5, e4, e5) ===
+            int center_control = 0;
+            int center_sqs[] = {make_sq(3,3), make_sq(3,4), make_sq(4,3), make_sq(4,4)};
+            for (int csq : center_sqs) {
+                if (is_square_attacked(csq, WHITE)) center_control += 8;
+                if (is_square_attacked(csq, BLACK)) center_control -= 8;
+                int p = pos.board[csq];
+                if (p == WP || p == WN) center_control += 15;
+                if (p == BP || p == BN) center_control -= 15;
+            }
+            dev += center_control;
+        }
+        
+        return dev;
     }
 
     int mirror_sq(int sq) const {
@@ -1228,7 +1396,7 @@ int main() {
         } else if (line.rfind("position", 0) == 0) {
             engine.set_position_from_uci(line);
         } else if (line.rfind("go", 0) == 0) {
-            int depth = 7;
+            int depth = 8;
             int movetime = -1;
             int wtime = 300000, btime = 300000, winc = 0, binc = 0;
             stringstream ss(line);
