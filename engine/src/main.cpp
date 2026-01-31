@@ -124,6 +124,12 @@ public:
     void set_startpos() {
         parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
     }
+    
+    void new_game() {
+        set_startpos();
+        tt.clear(); // Clear transposition table
+        cerr << "info string New game started, TT cleared" << endl;
+    }
 
     void parse_fen(const string &fen) {
         pos.board.fill(EMPTY);
@@ -403,33 +409,91 @@ private:
     int move_score(const Move &m) const {
         int score = 0;
         if (m.captured != EMPTY) {
-            // Basic MVV-LVA
-            score += 10 * piece_value(m.captured) - piece_value(m.moved);
-            
-            // === CRITICAL: Penalize capturing defended pieces with more valuable pieces ===
+            // === CRITICAL FIX: Don't give huge bonus for captures that lose material ===
             Side mover = (m.moved <= WK) ? WHITE : BLACK;
             Side opp = (mover == WHITE) ? BLACK : WHITE;
             
-            if (is_square_attacked(m.to, opp)) {
-                // Target square is defended
-                int our_value = piece_value(m.moved);
-                int their_value = piece_value(m.captured);
-                
-                if (our_value > their_value + 50) {
-                    // We're trading down badly (e.g., bishop for pawn)
-                    score -= (our_value - their_value);
+            int our_value = piece_value(m.moved);
+            int their_value = piece_value(m.captured);
+            bool is_defended = is_square_attacked(m.to, opp);
+            
+            if (!is_defended) {
+                // Free capture - use normal MVV-LVA
+                score += 10 * their_value - our_value;
+            } else {
+                // Target is defended - calculate if trade is good
+                if (our_value <= their_value + 50) {
+                    // Good or equal trade (e.g., knight takes bishop)
+                    score += their_value - our_value + 100;
+                } else {
+                    // BAD trade - we lose material!
+                    // e.g., Queen takes knight, pawn recaptures = we lose 580
+                    int material_loss = our_value - their_value;
+                    score -= material_loss * 2; // Heavy penalty
                 }
             }
         }
         if (m.promotion != EMPTY) {
             score += piece_value(m.promotion) + 800;
         }
-        if (m.is_castle) score += 50;
+        if (m.is_castle) score += 150; // Increased from 50 - castling is VERY important
         if (is_reverse_of_last(m)) {
             score -= reverse_move_penalty(m);
         }
         if (is_repeat_piece_move(m)) {
             score -= 120;
+        }
+        
+        // === CRITICAL: Bonus for developing knights and bishops ===
+        {
+            int pt = piece_type((Piece)m.moved);
+            Side mover = (m.moved <= WK) ? WHITE : BLACK;
+            int to_rank = rank_of(m.to);
+            int to_file = file_of(m.to);
+            
+            if (pos.fullmove_number <= 12 && m.captured == EMPTY) {
+                // Knight development bonus
+                if (pt == WN) {
+                    // Knight to f3/c3 for white or f6/c6 for black
+                    if (mover == WHITE && to_rank == 2) {
+                        if (to_file == 2 || to_file == 5) score += 80; // c3 or f3
+                    }
+                    if (mover == BLACK && to_rank == 5) {
+                        if (to_file == 2 || to_file == 5) score += 80; // c6 or f6
+                    }
+                    // Knights controlling center
+                    if (to_file >= 2 && to_file <= 5 && to_rank >= 2 && to_rank <= 5) {
+                        score += 40; // Central control
+                    }
+                }
+                
+                // Bishop development bonus
+                if (pt == WB) {
+                    // Active diagonals (not edge files)
+                    if (to_file >= 1 && to_file <= 6 && to_rank >= 1 && to_rank <= 6) {
+                        score += 50;
+                    }
+                    // Long diagonals (fianchetto or active squares)
+                    if ((to_file == 1 && to_rank == 1) || (to_file == 6 && to_rank == 1) ||
+                        (to_file == 1 && to_rank == 6) || (to_file == 6 && to_rank == 6)) {
+                        score += 30; // Fianchetto positions
+                    }
+                    // Bc4/Bc5/Bb5/Be2 etc - active squares
+                    if ((to_file >= 2 && to_file <= 5) && (to_rank >= 2 && to_rank <= 5)) {
+                        score += 40; // Central bishop is good
+                    }
+                }
+                
+                // Central pawn moves are good
+                if (pt == WP) {
+                    if (to_file == 3 || to_file == 4) { // d or e file
+                        if ((mover == WHITE && (to_rank == 2 || to_rank == 3)) ||
+                            (mover == BLACK && (to_rank == 4 || to_rank == 5))) {
+                            score += 60; // e4, d4, e5, d5 are great
+                        }
+                    }
+                }
+            }
         }
         
         // CRITICAL: Penalize pointless rook moves in opening
@@ -451,12 +515,17 @@ private:
             }
         }
         
-        // Discourage moving into attacked squares (simple blunder avoidance)
-        if (m.moved != EMPTY) {
+        // Discourage moving pieces into attacked squares (non-captures)
+        if (m.moved != EMPTY && m.captured == EMPTY) {
             Side mover = (m.moved <= WK) ? WHITE : BLACK;
             Side opp = (mover == WHITE) ? BLACK : WHITE;
             if (is_square_attacked(m.to, opp)) {
-                score -= piece_value(m.moved) / 3;
+                // Only penalize if not defended
+                if (!is_square_attacked(m.to, mover)) {
+                    score -= piece_value(m.moved); // Full value penalty for hanging piece
+                } else {
+                    score -= piece_value(m.moved) / 4; // Smaller penalty if defended
+                }
             }
         }
         
@@ -482,6 +551,37 @@ private:
             }
         }
         
+        // === CRITICAL: Penalize flank pawn moves in opening ===
+        // Moving a/b/g/h pawns early wastes tempo and doesn't develop
+        {
+            int pt = piece_type((Piece)m.moved);
+            if (pt == WP && m.captured == EMPTY && pos.fullmove_number <= 10) {
+                int from_file = file_of(m.from);
+                
+                // a-pawn and h-pawn moves are almost always bad in opening
+                if (from_file == 0 || from_file == 7) {
+                    score -= 180; // Heavy penalty for a/h pawn pushes
+                }
+                // b-pawn moves without fianchetto purpose
+                if (from_file == 1) {
+                    int to_rank = rank_of(m.to);
+                    // b6 or b3 could be fianchetto prep, but b5/b4 is usually bad
+                    Side mover = (m.moved <= WK) ? WHITE : BLACK;
+                    if (mover == WHITE && to_rank == 3) {
+                        // b4 for white = bad (not b3)
+                        score -= 120;
+                    } else if (mover == BLACK && to_rank == 4) {
+                        // b5 for black = bad (not b6)
+                        score -= 120;
+                    }
+                }
+                // g-pawn moves can weaken king
+                if (from_file == 6 && pos.fullmove_number <= 8) {
+                    score -= 100; // g-pawn weakens kingside castle
+                }
+            }
+        }
+        
         // === CRITICAL: Never trade queen for minor piece ===
         {
             int pt2 = piece_type((Piece)m.moved);
@@ -493,8 +593,23 @@ private:
                     Side mover = (m.moved <= WK) ? WHITE : BLACK;
                     Side opp = (mover == WHITE) ? BLACK : WHITE;
                     if (is_square_attacked(m.to, opp)) {
-                        // We're trading queen for minor piece = TERRIBLE
-                        score -= 600; // Huge penalty
+                        // We're trading queen for minor piece = CATASTROPHIC
+                        // Must be larger than MVV-LVA bonus (10 * captured_value)
+                        int captured_value = piece_value(m.captured);
+                        int queen_value = 900;
+                        // Net loss = queen - captured piece
+                        int net_loss = queen_value - captured_value;
+                        // Cancel out MVV-LVA bonus and add huge penalty
+                        score -= (10 * captured_value); // Cancel MVV-LVA
+                        score -= net_loss * 3; // Triple the material loss as penalty
+                    }
+                }
+                // Queen capturing rook while attacked = also bad (trading 900 for 500)
+                if (cap_pt == WR) {
+                    Side mover = (m.moved <= WK) ? WHITE : BLACK;
+                    Side opp = (mover == WHITE) ? BLACK : WHITE;
+                    if (is_square_attacked(m.to, opp)) {
+                        score -= 800; // Losing queen for rook is bad
                     }
                 }
             }
@@ -1559,6 +1674,7 @@ private:
         });
 
         int best_score = -INF;
+        
         for (auto &m : moves) {
             // Basic blunder filter for queen moves
             if (piece_type((Piece)m.moved) == WQ && see_score(m) < -200) {
@@ -1570,18 +1686,10 @@ private:
             
             Undo u = make_move(m);
             
-            // === CHECK FOR OPPONENT FORK THREATS AFTER OUR MOVE ===
-            Side opponent = pos.side_to_move; // After make_move, it's opponent's turn
-            int opp_forks = count_knight_fork_threats(opponent);
-            
             Move child_best;
             int score = -alpha_beta(depth - 1, -beta, -alpha, child_best);
-            unmake_move(m, u);
             
-            // Heavy penalty if we allow a fork
-            if (opp_forks > 0) {
-                score -= 400 * opp_forks;
-            }
+            unmake_move(m, u);
             
             // Apply penalties AFTER unmake but using pre-computed flags
             if (is_reverse) {
@@ -1638,6 +1746,7 @@ private:
             if (score > alpha) alpha = score;
             if (alpha >= beta) break;
         }
+        
         return best_score;
     }
 
@@ -1712,7 +1821,7 @@ int main() {
         } else if (line == "isready") {
             cout << "readyok" << std::endl;
         } else if (line == "ucinewgame") {
-            engine.set_startpos();
+            engine.new_game();
         } else if (line.rfind("position", 0) == 0) {
             engine.set_position_from_uci(line);
         } else if (line.rfind("go", 0) == 0) {

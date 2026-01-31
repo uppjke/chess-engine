@@ -781,6 +781,7 @@ function setStartPosition() {
   positionHistory.clear();
   recordPosition();
   pushHistory();
+  sendUci('ucinewgame'); // Reset engine state
   syncEngine();
   updateOrientation();
   updateGameStatus();
@@ -896,6 +897,7 @@ editBtn.addEventListener('click', () => {
   exitPreview();
   editMode = !editMode;
   editBtn.textContent = `Редактор: ${editMode ? 'вкл' : 'выкл'}`;
+  renderBoard(); // Re-render to update draggable state
 });
 engineMoveBtn.addEventListener('click', requestEngineMove);
 if (autoMoveEl) {
@@ -941,6 +943,7 @@ applyEditBtn.addEventListener('click', () => {
   positionHistory.clear();
   recordPosition();
   pushHistory();
+  sendUci('ucinewgame'); // Reset engine state after editing
   syncEngine();
   renderBoard();
   updateTopStatus();
