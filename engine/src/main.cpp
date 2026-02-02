@@ -703,6 +703,74 @@ private:
             }
         }
         
+        // === CRITICAL: Pawn moves in front of castled king weaken it ===
+        // g6, h6, f6 when king is castled kingside = dangerous
+        {
+            int pt = piece_type((Piece)m.moved);
+            if (pt == WP && m.captured == EMPTY) {
+                Side mover = (m.moved <= WK) ? WHITE : BLACK;
+                Side opp = (mover == WHITE) ? BLACK : WHITE;
+                int from_file = file_of(m.from);
+                
+                // Find our king
+                int our_king = (mover == WHITE) ? WK : BK;
+                int king_sq = -1;
+                for (int sq = 0; sq < 64; ++sq) {
+                    if (pos.board[sq] == our_king) {
+                        king_sq = sq;
+                        break;
+                    }
+                }
+                
+                if (king_sq != -1) {
+                    int king_file = file_of(king_sq);
+                    int king_rank = rank_of(king_sq);
+                    
+                    // King is castled kingside (on g or h file, back rank)
+                    bool kingside_castled = (mover == WHITE) 
+                        ? (king_file >= 6 && king_rank == 0)
+                        : (king_file >= 6 && king_rank == 7);
+                    
+                    // King is castled queenside
+                    bool queenside_castled = (mover == WHITE)
+                        ? (king_file <= 2 && king_rank == 0)
+                        : (king_file <= 2 && king_rank == 7);
+                    
+                    // Check if enemy queen is active (not on starting square)
+                    int opp_queen = (opp == WHITE) ? WQ : BQ;
+                    bool enemy_queen_active = false;
+                    for (int sq = 0; sq < 64; ++sq) {
+                        if (pos.board[sq] == opp_queen) {
+                            int qr = rank_of(sq);
+                            // Queen is active if not on back rank or if advanced
+                            if ((opp == WHITE && qr >= 2) || (opp == BLACK && qr <= 5)) {
+                                enemy_queen_active = true;
+                            }
+                            break;
+                        }
+                    }
+                    
+                    if (kingside_castled && enemy_queen_active) {
+                        // Moving g or h pawn = weakening king!
+                        if (from_file == 6 || from_file == 7) {
+                            score -= 300; // Big penalty - opens king to attack
+                        }
+                        // Moving f pawn also weakens
+                        if (from_file == 5) {
+                            score -= 200;
+                        }
+                    }
+                    
+                    if (queenside_castled && enemy_queen_active) {
+                        // Moving a, b, c pawn weakens queenside castle
+                        if (from_file <= 2) {
+                            score -= 250;
+                        }
+                    }
+                }
+            }
+        }
+        
         // === CRITICAL: Queen grabbing flank pawns is usually a TRAP ===
         {
             int pt = piece_type((Piece)m.moved);
