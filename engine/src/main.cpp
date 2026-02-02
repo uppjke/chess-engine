@@ -287,21 +287,23 @@ public:
         int best_score = -INF;
         int depth_reached = 0;
         
-        // DEBUG: Show all moves with scores at depth 1
+        // DEBUG
         auto dbg_moves = generate_legal_moves();
         cerr << "info string DEBUG: " << dbg_moves.size() << " legal moves, fullmove=" << pos.fullmove_number << endl;
         
-        // === FIRST: Check if WE have a forced mate ===
-        // This is fast because it only considers checks
-        int our_mate = has_mate_in_n(5); // Check for mate in 5
+        // === QUICK CHECK: Do we have a forced mate in 3? ===
+        int our_mate = has_mate_in_n(3); // Check for mate in 3 (fast with node limit)
         if (our_mate >= MATE_SCORE - 20) {
-            cerr << "info string FOUND FORCED MATE! Searching for mating move..." << endl;
-            // Find the mating move
+            cerr << "info string FOUND FORCED MATE!" << endl;
+            // Find the mating move - try all checks first
             auto moves = generate_legal_moves();
             for (auto &m : moves) {
                 Undo u = make_move(m);
-                if (in_check(pos.side_to_move)) { // Must be a check
-                    int score = -mate_search(9, false); // Check if this leads to mate
+                bool gives_check = in_check(pos.side_to_move);
+                if (gives_check) {
+                    mate_search_nodes = 0;
+                    int score = mate_search(5, false); // Defender tries to escape
+                    // If defender can't escape (score still high), this is the move
                     if (score >= MATE_SCORE - 20) {
                         unmake_move(m, u);
                         cerr << "info string Playing mating move!" << endl;
@@ -312,6 +314,7 @@ public:
             }
         }
         
+        // Main iterative deepening search
         for (int depth = 1; depth <= max_depth; ++depth) {
             int score = alpha_beta(depth, -INF, INF, best);
             if (stop_search) break;
@@ -319,34 +322,44 @@ public:
             depth_reached = depth;
         }
         
-        // === CRITICAL: Check if best move allows mate (up to 3 moves) ===
+        // === SAFETY CHECK: Does our best move allow opponent to mate us? ===
         if (best.from != -1 && !stop_search) {
             Undo u = make_move(best);
-            int opp_mate = opponent_has_mate_in_n(3); // Check mate in 3
-            if (opp_mate <= -(MATE_SCORE - 20) || opponent_has_mate_in_one()) {
+            bool allows_mate1 = opponent_has_mate_in_one();
+            int opp_mate = 0;
+            if (!allows_mate1) {
+                opp_mate = opponent_has_mate_in_n(2); // Quick check: mate in 2
+            }
+            
+            if (allows_mate1 || opp_mate >= MATE_SCORE - 20) {
                 // This move allows mate! Find alternative
                 unmake_move(best, u);
                 cerr << "info string WARNING: Best move allows mate, finding alternative" << endl;
+                
                 auto moves = generate_legal_moves();
                 Move safe_best;
                 int safe_score = -INF;
+                
                 for (auto &m : moves) {
                     Undo u2 = make_move(m);
-                    int allows_mate = opponent_has_mate_in_n(3);
-                    bool allows_mate1 = opponent_has_mate_in_one();
-                    Move child_best;
+                    bool m_allows_mate1 = opponent_has_mate_in_one();
+                    int m_opp_mate = m_allows_mate1 ? MATE_SCORE : opponent_has_mate_in_n(2);
+                    
                     int score;
-                    if (allows_mate1 || allows_mate <= -(MATE_SCORE - 20)) {
-                        score = -MATE_SCORE;
+                    if (m_allows_mate1 || m_opp_mate >= MATE_SCORE - 20) {
+                        score = -MATE_SCORE; // Skip moves that allow mate
                     } else {
+                        Move child_best;
                         score = -alpha_beta(3, -INF, INF, child_best);
                     }
                     unmake_move(m, u2);
+                    
                     if (score > safe_score) {
                         safe_score = score;
                         safe_best = m;
                     }
                 }
+                
                 if (safe_best.from != -1) {
                     best = safe_best;
                 }
@@ -474,6 +487,37 @@ private:
                     // Unless this move blocks or captures the attacker
                     if (m.captured == EMPTY) {
                         score -= 1500; // Penalty for ignoring queen attack
+                    }
+                }
+            }
+            
+            // === CRITICAL: Queen moving to an attacked square = SUICIDE ===
+            int pt_queen = piece_type((Piece)m.moved);
+            if (pt_queen == WQ && m.captured == EMPTY) {
+                // Queen moving without capturing - check destination
+                if (is_square_attacked(m.to, opp)) {
+                    // Queen going to attacked square = losing queen for free!
+                    score -= 2000; // Massive penalty
+                }
+            }
+        }
+        
+        // === CRITICAL: ANY piece moving to attacked undefended square ===
+        {
+            int pt = piece_type((Piece)m.moved);
+            Side mover = (m.moved <= WK) ? WHITE : BLACK;
+            Side opp = (mover == WHITE) ? BLACK : WHITE;
+            
+            if (m.captured == EMPTY && is_square_attacked(m.to, opp)) {
+                // Moving to attacked square
+                if (!is_square_attacked(m.to, mover)) {
+                    // And it's NOT defended - we lose the piece!
+                    if (pt == WQ) {
+                        score -= 2500; // Losing queen = disaster
+                    } else if (pt == WR) {
+                        score -= 1000; // Losing rook
+                    } else if (pt == WB || pt == WN) {
+                        score -= 600; // Losing minor piece
                     }
                 }
             }
@@ -745,6 +789,22 @@ private:
             if (pt2 == WK) {
                 int to_rank = rank_of(m.to);
                 int to_file = file_of(m.to);
+                Side mover = (m.moved <= WK) ? WHITE : BLACK;
+                Side opp = (mover == WHITE) ? BLACK : WHITE;
+                
+                // === HUGE penalty for king moving to center when in check ===
+                // This is Ke7 instead of blocking with a piece - almost always bad
+                if (is_square_attacked(m.from, opp)) { // King was in check (approximation)
+                    // We're in check and moving king
+                    if ((mover == WHITE && to_rank >= 1) || (mover == BLACK && to_rank <= 6)) {
+                        // King moving forward (toward center) while in check
+                        score -= 600; // Prefer blocking or capturing
+                    }
+                    // Extra penalty for going to exposed files (e, d especially)
+                    if (to_file >= 3 && to_file <= 4) {
+                        score -= 400; // King to d or e file while in check = very bad
+                    }
+                }
                 
                 // King moving to ranks 2-5 (center) = disaster
                 if (to_rank >= 2 && to_rank <= 5) {
@@ -764,8 +824,6 @@ private:
                 
                 // === CRITICAL: Penalize king moves that expose to attack ===
                 // After castling, king should stay safe - don't walk into open files
-                Side mover = (m.moved <= WK) ? WHITE : BLACK;
-                Side opp = (mover == WHITE) ? BLACK : WHITE;
                 
                 // Check if destination is attacked or on open file
                 if (is_square_attacked(m.to, opp)) {
@@ -1212,9 +1270,14 @@ private:
     
     // === FAST MATE SEARCH ===
     // Search for forced mate up to 'depth' plies (half-moves)
-    // Only considers checks and forcing moves - much faster than full search
-    // Returns: positive score if WE can mate, negative if OPPONENT can mate us, 0 if no mate found
+    // Returns: MATE_SCORE - depth if mate found, 0 if no mate
+    // Node-limited to avoid timeout
+    int mate_search_nodes = 0;
+    static constexpr int MATE_SEARCH_NODE_LIMIT = 5000; // Fast cutoff for 500ms games
+    
     int mate_search(int depth, bool maximizing) {
+        mate_search_nodes++;
+        if (mate_search_nodes > MATE_SEARCH_NODE_LIMIT) return 0; // Timeout
         if (depth <= 0) return 0;
         
         auto moves = generate_legal_moves();
@@ -1222,16 +1285,18 @@ private:
         // Check for checkmate or stalemate
         if (moves.empty()) {
             if (in_check(pos.side_to_move)) {
-                // Checkmate! Return score based on who is mated
+                // Checkmate!
                 return maximizing ? -(MATE_SCORE - (10 - depth)) : (MATE_SCORE - (10 - depth));
             }
             return 0; // Stalemate
         }
         
         if (maximizing) {
-            // We're looking for OUR mate
-            // Only consider checks (forcing moves)
+            // Attacker's turn - looking for mate
             int best = 0;
+            
+            // Quick sort: only prioritize checks (fast check without make_move)
+            // First pass: try all checks
             for (auto &m : moves) {
                 Undo u = make_move(m);
                 bool gives_check = in_check(pos.side_to_move);
@@ -1239,48 +1304,60 @@ private:
                 if (gives_check) {
                     int score = mate_search(depth - 1, false);
                     if (score > best) best = score;
+                    if (best >= MATE_SCORE - 20) {
+                        unmake_move(m, u);
+                        return best; // Found mate!
+                    }
                 }
                 unmake_move(m, u);
-                
-                if (best >= MATE_SCORE - 20) break; // Found mate, stop
             }
+            
+            // Second pass: try captures only if depth is high enough
+            if (depth >= 4 && best == 0) {
+                for (auto &m : moves) {
+                    if (m.captured != EMPTY) {
+                        Undo u = make_move(m);
+                        int score = mate_search(depth - 1, false);
+                        if (score > best) best = score;
+                        unmake_move(m, u);
+                        if (best >= MATE_SCORE - 20) return best;
+                    }
+                }
+            }
+            
             return best;
         } else {
-            // Opponent's turn - they try to escape
-            // Must check ALL moves (any legal move is an escape attempt)
-            int worst = MATE_SCORE; // Assume we're getting mated
-            bool has_escape = false;
+            // Defender's turn - must check ALL moves
+            int worst = MATE_SCORE;
             
             for (auto &m : moves) {
                 Undo u = make_move(m);
                 int score = mate_search(depth - 1, true);
                 unmake_move(m, u);
                 
-                if (score < worst) {
-                    worst = score;
-                    has_escape = true;
-                }
-                if (worst == 0) break; // Found escape, no mate
+                if (score < worst) worst = score;
+                if (worst == 0) return 0; // Found escape
             }
             
-            return has_escape ? worst : 0;
+            return worst;
         }
     }
     
     // Check if we have mate in N moves (N = depth/2 moves each side)
     int has_mate_in_n(int depth) {
+        mate_search_nodes = 0;
         return mate_search(depth * 2, true);
     }
     
     // Check if opponent has mate in N moves against us
+    // AFTER we made our move, it's opponent's turn to find mate
     int opponent_has_mate_in_n(int depth) {
-        // Flip perspective - opponent is maximizing
-        return mate_search(depth * 2, false);
+        mate_search_nodes = 0; // Reset node counter
+        return mate_search(depth * 2, true);
     }
     
-    // Check if the current side to move can mate us in one
+    // Quick check if current side can mate in 1 (very fast)
     bool opponent_has_mate_in_one() {
-        // Current side to move is the opponent (after we made our move)
         return has_mate_in_one();
     }
 
@@ -1886,13 +1963,11 @@ private:
             Undo u = make_move(m);
             
             // === CRITICAL: Check if this move allows mate in 1 ===
-            // Only check at reasonable depth to avoid slowdown
-            if (depth >= 4) {
-                if (has_mate_in_one()) {
-                    // Opponent can mate us after this move!
-                    unmake_move(m, u);
-                    continue; // Skip this move entirely - it's suicidal
-                }
+            // Fast check - only mate in 1 (mate in 2+ handled by search depth)
+            if (has_mate_in_one()) {
+                // Opponent can mate us in 1 move!
+                unmake_move(m, u);
+                continue; // Skip this move entirely - it's suicidal
             }
             
             // === CHECK EXTENSION: If this move gives check, extend search ===
