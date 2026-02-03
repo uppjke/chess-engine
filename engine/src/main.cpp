@@ -289,10 +289,20 @@ public:
         
         // DEBUG
         auto dbg_moves = generate_legal_moves();
-        cerr << "info string DEBUG: " << dbg_moves.size() << " legal moves, fullmove=" << pos.fullmove_number << endl;
+        
+        // Count pieces to decide if mate search is worthwhile
+        int heavy_pieces = 0;
+        for (int sq = 0; sq < 64; ++sq) {
+            int p = pos.board[sq];
+            if (p == WQ || p == BQ || p == WR || p == BR) heavy_pieces++;
+        }
         
         // === QUICK CHECK: Do we have a forced mate in 3? ===
-        int our_mate = has_mate_in_n(3); // Check for mate in 3 (fast with node limit)
+        // Only check if there are heavy pieces (otherwise mate unlikely in 3 moves)
+        int our_mate = 0;
+        if (heavy_pieces > 0) {
+            our_mate = has_mate_in_n(3); // Check for mate in 3 (fast with node limit)
+        }
         if (our_mate >= MATE_SCORE - 20) {
             cerr << "info string FOUND FORCED MATE!" << endl;
             // Find the mating move - try all checks first
@@ -314,10 +324,46 @@ public:
             }
         }
         
+        // === QUICK CHECK: Obvious promotion to queen ===
+        // If we have a pawn that can promote to queen safely, prioritize it!
+        {
+            auto moves = generate_legal_moves();
+            Move best_promo;
+            for (auto &m : moves) {
+                if (m.promotion == WQ || m.promotion == BQ) {
+                    // Check if promotion is safe (not immediately captured)
+                    Undo u = make_move(m);
+                    bool queen_safe = !is_square_attacked(m.to, pos.side_to_move);
+                    unmake_move(m, u);
+                    if (queen_safe) {
+                        best_promo = m;
+                        break; // Take first safe queen promotion
+                    }
+                }
+            }
+            if (best_promo.from != -1) {
+                return best_promo;
+            }
+        }
+        
         // Main iterative deepening search
+        node_count = 0;
+        Move prev_best; // Best from completed iteration
         for (int depth = 1; depth <= max_depth; ++depth) {
-            int score = alpha_beta(depth, -INF, INF, best);
-            if (stop_search) break;
+            Move curr_best;
+            int score = alpha_beta(depth, -INF, INF, curr_best);
+            if (stop_search) {
+                // Use best from previous completed iteration
+                if (prev_best.from != -1) {
+                    best = prev_best;
+                } else if (curr_best.from != -1) {
+                    best = curr_best; // Fallback to partial if no completed
+                }
+                break;
+            }
+            // Iteration completed - save as best
+            best = curr_best;
+            prev_best = curr_best;
             best_score = score;
             depth_reached = depth;
         }
@@ -450,6 +496,119 @@ private:
     int move_score(const Move &m) const {
         int score = 0;
         
+        // === CRITICAL: Check if we can capture enemy QUEEN ===
+        // This should have highest priority!
+        {
+            int cap_pt = piece_type((Piece)m.captured);
+            if (cap_pt == WQ) {
+                // We can take the queen!
+                Side mover = (m.moved <= WK) ? WHITE : BLACK;
+                Side opp = (mover == WHITE) ? BLACK : WHITE;
+                int our_value = piece_value(m.moved);
+                
+                if (!is_square_attacked(m.to, opp)) {
+                    // Free queen capture!
+                    score += 5000; // Massive bonus
+                } else {
+                    // Queen is defended, but trading for queen is almost always good
+                    if (our_value < 900) {
+                        score += 3000; // Trading minor/rook for queen = great
+                    }
+                }
+            }
+        }
+        
+        // === CRITICAL: Check if any of OUR pieces is hanging (under attack, not defended) ===
+        // Also check if attacked by LESS valuable piece (bad trade even if defended)
+        {
+            Side mover = (m.moved <= WK) ? WHITE : BLACK;
+            Side opp = (mover == WHITE) ? BLACK : WHITE;
+            
+            // Find our piece under threat (hanging OR attacked by less valuable piece)
+            int worst_threat_sq = -1;
+            int worst_threat_value = 0;
+            
+            for (int sq = 0; sq < 64; ++sq) {
+                int p = pos.board[sq];
+                if (p == EMPTY) continue;
+                bool our_piece = (mover == WHITE) ? is_white((Piece)p) : is_black((Piece)p);
+                if (!our_piece) continue;
+                if (piece_type((Piece)p) == WK) continue; // Skip king
+                
+                int our_val = piece_value(p);
+                
+                // Is this piece attacked?
+                if (is_square_attacked(sq, opp)) {
+                    // Find least valuable attacker
+                    int min_attacker_val = 10000;
+                    for (int asq = 0; asq < 64; ++asq) {
+                        int ap = pos.board[asq];
+                        if (ap == EMPTY) continue;
+                        bool enemy = (opp == WHITE) ? is_white((Piece)ap) : is_black((Piece)ap);
+                        if (!enemy) continue;
+                        
+                        // Check if this enemy attacks sq
+                        // Simple check: is sq attacked by opp - we know it is
+                        // Need to find the actual attacker value
+                        // For simplicity, check pawn attacks
+                        int apf = file_of(asq);
+                        int apr = rank_of(asq);
+                        int sf = file_of(sq);
+                        int sr = rank_of(sq);
+                        int pt_a = piece_type((Piece)ap);
+                        
+                        if (pt_a == WP) {
+                            // Pawn attack check
+                            if (opp == WHITE && apr + 1 == sr && abs(apf - sf) == 1) {
+                                min_attacker_val = 100;
+                            }
+                            if (opp == BLACK && apr - 1 == sr && abs(apf - sf) == 1) {
+                                min_attacker_val = 100;
+                            }
+                        }
+                    }
+                    
+                    bool is_defended = is_square_attacked(sq, mover);
+                    
+                    // Piece is threatened if:
+                    // 1. Not defended (hanging) OR
+                    // 2. Attacked by less valuable piece (bad trade)
+                    bool is_threatened = !is_defended || (min_attacker_val < our_val - 50);
+                    
+                    if (is_threatened) {
+                        int threat_value = is_defended ? (our_val - min_attacker_val) : our_val;
+                        if (threat_value > worst_threat_value) {
+                            worst_threat_value = threat_value;
+                            worst_threat_sq = sq;
+                        }
+                    }
+                }
+            }
+            
+            if (worst_threat_sq != -1) {
+                // We have a piece under threat!
+                
+                // This move should either:
+                // 1. Move the threatened piece
+                // 2. Capture the attacker
+                // 3. Block the attack
+                
+                bool saves_piece = (m.from == worst_threat_sq);
+                
+                if (saves_piece) {
+                    // Check if new square is safe
+                    if (!is_square_attacked(m.to, opp)) {
+                        score += worst_threat_value * 3; // Saving the piece!
+                    } else {
+                        score += worst_threat_value; // Moving but still attacked
+                    }
+                } else if (m.captured == EMPTY) {
+                    // Ignoring our threatened piece!
+                    score -= worst_threat_value * 3; // Huge penalty
+                }
+            }
+        }
+        
         // === CRITICAL: Check if our queen is under attack ===
         // If so, give HUGE bonus to queen moves that escape
         {
@@ -551,7 +710,22 @@ private:
         if (m.promotion != EMPTY) {
             score += piece_value(m.promotion) + 800;
         }
-        if (m.is_castle) score += 150; // Increased from 50 - castling is VERY important
+        if (m.is_castle) score += 350; // HUGE bonus for castling - king safety is paramount
+        
+        // === CRITICAL: If castling is available, penalize other king moves ===
+        {
+            int pt = piece_type((Piece)m.moved);
+            Side mover = (m.moved <= WK) ? WHITE : BLACK;
+            if (pt == WK && !m.is_castle) {
+                // King move that is NOT castling
+                bool can_castle_k = (mover == WHITE) ? (pos.castling_rights & 1) : (pos.castling_rights & 4);
+                bool can_castle_q = (mover == WHITE) ? (pos.castling_rights & 2) : (pos.castling_rights & 8);
+                if (can_castle_k || can_castle_q) {
+                    score -= 300; // Losing castling rights is terrible!
+                }
+            }
+        }
+        
         if (is_reverse_of_last(m)) {
             score -= reverse_move_penalty(m);
         }
@@ -1325,11 +1499,13 @@ private:
         auto moves = generate_legal_moves();
         for (auto &m : moves) {
             Undo u = make_move(m);
-            bool mate = false;
-            auto replies = generate_legal_moves();
-            if (replies.empty() && in_check(pos.side_to_move)) {
-                mate = true;
+            // Quick check: must give check for mate
+            if (!in_check(pos.side_to_move)) {
+                unmake_move(m, u);
+                continue;
             }
+            auto replies = generate_legal_moves();
+            bool mate = replies.empty();
             unmake_move(m, u);
             if (mate) return true;
         }
@@ -1346,6 +1522,7 @@ private:
     int mate_search(int depth, bool maximizing) {
         mate_search_nodes++;
         if (mate_search_nodes > MATE_SEARCH_NODE_LIMIT) return 0; // Timeout
+        if (time_up()) return 0; // Also check time!
         if (depth <= 0) return 0;
         
         auto moves = generate_legal_moves();
@@ -1734,7 +1911,14 @@ private:
             int psq = white_piece ? sq : mirror_sq(sq);
             int val = 0;
             switch (piece_type((Piece)p)) {
-                case WP: val = 100 + pst_pawn[psq]; break;
+                case WP: {
+                    val = 100 + pst_pawn[psq];
+                    // BONUS: Pawn about to promote (7th/2nd rank)
+                    int rank = rank_of(sq);
+                    if (white_piece && rank == 6) val += 500; // White pawn on 7th rank
+                    if (!white_piece && rank == 1) val += 500; // Black pawn on 2nd rank
+                    break;
+                }
                 case WN: val = 320 + pst_knight[psq]; break;
                 case WB: val = 330 + pst_bishop[psq]; break;
                 case WR: val = 500 + pst_rook[psq]; break;
@@ -1989,7 +2173,10 @@ private:
         return make_sq(f, 7 - r);
     }
 
+    int node_count = 0;
+    
     int alpha_beta(int depth, int alpha, int beta, Move &best) {
+        node_count++;
         if (time_up()) return 0;
         if (depth == 0) return quiescence(alpha, beta);
 
@@ -2002,10 +2189,8 @@ private:
         bool in_check_now = in_check(pos.side_to_move);
         
         // === CHECK EXTENSION: Extend search when in check ===
-        // This is crucial for seeing checkmates deeper
-        if (in_check_now) {
-            depth += 2; // More aggressive extension when in check
-        }
+        // Only extend once per check to avoid explosion
+        // This is done in the recursive call instead
 
         auto moves = generate_legal_moves();
         if (moves.empty()) {
@@ -2031,11 +2216,9 @@ private:
             Undo u = make_move(m);
             
             // === CRITICAL: Check if this move allows mate in 1 ===
-            // Fast check - only mate in 1 (mate in 2+ handled by search depth)
             if (has_mate_in_one()) {
-                // Opponent can mate us in 1 move!
                 unmake_move(m, u);
-                continue; // Skip this move entirely - it's suicidal
+                continue; // Skip this move - it allows opponent to mate us
             }
             
             // === CHECK EXTENSION: If this move gives check, extend search ===
@@ -2122,7 +2305,8 @@ private:
         // Sort captures by MVV-LVA
         vector<Move> captures;
         for (auto &m : moves) {
-            if (m.captured != EMPTY || m.is_en_passant) {
+            // Include captures, en passant, AND promotions (very important!)
+            if (m.captured != EMPTY || m.is_en_passant || m.promotion != EMPTY) {
                 captures.push_back(m);
             }
         }
@@ -2149,7 +2333,9 @@ private:
     }
 
     bool time_up() {
-        if (stop_search) return true;
+        if (stop_search) {
+            return true;
+        }
         auto now = chrono::steady_clock::now();
         int elapsed = (int)chrono::duration_cast<chrono::milliseconds>(now - search_start).count();
         if (elapsed >= time_limit) {
