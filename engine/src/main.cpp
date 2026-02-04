@@ -304,23 +304,38 @@ public:
             our_mate = has_mate_in_n(3); // Check for mate in 3 (fast with node limit)
         }
         if (our_mate >= MATE_SCORE - 20) {
-            cerr << "info string FOUND FORCED MATE!" << endl;
-            // Find the mating move - try all checks first
+            // Find the SHORTEST mating move
             auto moves = generate_legal_moves();
+            
+            Move best_mate_move;
+            int best_mate_score = 0;
+            
             for (auto &m : moves) {
                 Undo u = make_move(m);
                 bool gives_check = in_check(pos.side_to_move);
+                
                 if (gives_check) {
-                    mate_search_nodes = 0;
-                    int score = mate_search(5, false); // Defender tries to escape
-                    // If defender can't escape (score still high), this is the move
-                    if (score >= MATE_SCORE - 20) {
+                    // Check for immediate checkmate (opponent has no moves)
+                    auto opp_moves = generate_legal_moves();
+                    if (opp_moves.empty()) {
+                        // This is CHECKMATE IN 1 - best possible!
                         unmake_move(m, u);
-                        cerr << "info string Playing mating move!" << endl;
                         return m;
+                    }
+                    
+                    // Otherwise check mate_search for longer mates
+                    mate_search_nodes = 0;
+                    int score = mate_search(5, false);
+                    if (score > best_mate_score) {
+                        best_mate_score = score;
+                        best_mate_move = m;
                     }
                 }
                 unmake_move(m, u);
+            }
+            
+            if (best_mate_score >= MATE_SCORE - 20) {
+                return best_mate_move;
             }
         }
         
@@ -1788,6 +1803,8 @@ private:
 
     bool is_opponent(int p, int target) const {
         if (target == EMPTY) return false;
+        // Never allow capturing a king!
+        if (target == WK || target == BK) return false;
         if (p <= WK) return target >= BP;
         return target <= WK;
     }
