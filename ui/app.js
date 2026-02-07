@@ -218,6 +218,33 @@ function isKingInCheck(side) {
   return isSquareAttacked(kingSq, attacker);
 }
 
+function isInsufficientMaterial() {
+  let wN = 0, wB = 0, wOther = 0, wBsq = -1;
+  let bN = 0, bB = 0, bOther = 0, bBsq = -1;
+  for (let sq = 0; sq < 64; sq++) {
+    const p = board[sq];
+    if (p === '.' || p === 'K' || p === 'k') continue;
+    if (p === 'N') wN++;
+    else if (p === 'B') { wB++; wBsq = sq; }
+    else if (p === p.toUpperCase()) wOther++;
+    else if (p === 'n') bN++;
+    else if (p === 'b') { bB++; bBsq = sq; }
+    else bOther++;
+  }
+  if (wOther > 0 || bOther > 0) return false;
+  const wMinor = wN + wB, bMinor = bN + bB;
+  if (wMinor === 0 && bMinor === 0) return true;
+  if (wMinor === 0 && bMinor === 1) return true;
+  if (wMinor === 1 && bMinor === 0) return true;
+  if (wB === 1 && bB === 1 && wN === 0 && bN === 0) {
+    const file = sq => sq & 7, rank = sq => sq >> 3;
+    const wLight = (file(wBsq) + rank(wBsq)) % 2 === 0;
+    const bLight = (file(bBsq) + rank(bBsq)) % 2 === 0;
+    if (wLight === bLight) return true;
+  }
+  return false;
+}
+
 function updateGameStatus() {
   if (!gameStatusEl) return;
   let text = 'ОК';
@@ -227,6 +254,9 @@ function updateGameStatus() {
     state = 'warn';
   } else if (isThreefold()) {
     text = 'Ничья (3 повтора)';
+    state = 'warn';
+  } else if (isInsufficientMaterial()) {
+    text = 'Ничья (недостаточно фигур)';
     state = 'warn';
   } else if (legalMoves.size === 0) {
     if (isKingInCheck(sideToMove)) {

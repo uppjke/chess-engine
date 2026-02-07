@@ -472,6 +472,8 @@ public:
 
     bool has_legal_moves() { return !generate_legal_moves().empty(); }
 
+    bool check_insufficient_material() const { return is_insufficient_material(); }
+
 private:
     Position pos;
     HashKeys keys;
@@ -1632,6 +1634,40 @@ private:
         return false;
     }
 
+    // Detect insufficient mating material
+    // Draw if: K vs K, K+B vs K, K+N vs K, K+B vs K+B (same color bishops)
+    bool is_insufficient_material() const {
+        int w_knights = 0, w_bishops = 0, w_others = 0;
+        int b_knights = 0, b_bishops = 0, b_others = 0;
+        int w_bishop_sq = -1, b_bishop_sq = -1;
+        for (int sq = 0; sq < 64; ++sq) {
+            int p = pos.board[sq];
+            if (p == EMPTY || p == WK || p == BK) continue;
+            if (p == WN) { w_knights++; }
+            else if (p == WB) { w_bishops++; w_bishop_sq = sq; }
+            else if (is_white((Piece)p)) { w_others++; }
+            else if (p == BN) { b_knights++; }
+            else if (p == BB) { b_bishops++; b_bishop_sq = sq; }
+            else if (is_black((Piece)p)) { b_others++; }
+        }
+        // Any pawns, rooks, or queens -> sufficient
+        if (w_others > 0 || b_others > 0) return false;
+        int w_minor = w_knights + w_bishops;
+        int b_minor = b_knights + b_bishops;
+        // K vs K
+        if (w_minor == 0 && b_minor == 0) return true;
+        // K+minor vs K
+        if (w_minor == 0 && b_minor == 1) return true;
+        if (w_minor == 1 && b_minor == 0) return true;
+        // K+B vs K+B with same color square bishops
+        if (w_bishops == 1 && b_bishops == 1 && w_knights == 0 && b_knights == 0) {
+            bool w_light = ((file_of(w_bishop_sq) + rank_of(w_bishop_sq)) % 2) == 0;
+            bool b_light = ((file_of(b_bishop_sq) + rank_of(b_bishop_sq)) % 2) == 0;
+            if (w_light == b_light) return true;
+        }
+        return false;
+    }
+
     void generate_pseudo_moves(vector<Move> &moves) {
         moves.clear();
         for (int sq = 0; sq < 64; ++sq) {
@@ -2197,7 +2233,7 @@ private:
         if (time_up()) return 0;
         if (depth == 0) return quiescence(alpha, beta);
 
-        if (pos.halfmove_clock >= 100 || is_repetition()) {
+        if (pos.halfmove_clock >= 100 || is_repetition() || is_insufficient_material()) {
             int draw_score = evaluate() / 10;
             draw_score = clamp(draw_score, -20, 20);
             return draw_score;
@@ -2398,12 +2434,18 @@ int main() {
                 else if (token == "winc") ss >> winc;
                 else if (token == "binc") ss >> binc;
             }
-            int time_ms = movetime > 0 ? movetime : engine.compute_time_ms(wtime, btime, winc, binc);
-            chess::Move best = engine.search_bestmove(depth, time_ms);
-            if (best.from == -1) {
+            // Check for insufficient material before searching
+            if (engine.check_insufficient_material()) {
+                cout << "info string draw insufficient material" << std::endl;
                 cout << "bestmove 0000" << std::endl;
             } else {
-                cout << "bestmove " << engine.move_to_uci_public(best) << std::endl;
+                int time_ms = movetime > 0 ? movetime : engine.compute_time_ms(wtime, btime, winc, binc);
+                chess::Move best = engine.search_bestmove(depth, time_ms);
+                if (best.from == -1) {
+                    cout << "bestmove 0000" << std::endl;
+                } else {
+                    cout << "bestmove " << engine.move_to_uci_public(best) << std::endl;
+                }
             }
         } else if (line == "legal") {
             cout << engine.legal_moves_uci() << std::endl;
