@@ -119,6 +119,7 @@ public:
     Engine() {
         init_tables();
         set_startpos();
+        opening_rng.seed(chrono::steady_clock::now().time_since_epoch().count());
     }
 
     void set_startpos() {
@@ -128,6 +129,8 @@ public:
     void new_game() {
         set_startpos();
         tt.clear(); // Clear transposition table
+        // Re-seed opening RNG for variety each game
+        opening_rng.seed(chrono::steady_clock::now().time_since_epoch().count());
         cerr << "info string New game started, TT cleared" << endl;
     }
 
@@ -364,9 +367,12 @@ public:
         // Main iterative deepening search
         node_count = 0;
         Move prev_best; // Best from completed iteration
+        vector<pair<Move, int>> root_scores; // Collect root move scores
+        vector<pair<Move, int>> last_complete_root_scores;
         for (int depth = 1; depth <= max_depth; ++depth) {
             Move curr_best;
-            int score = alpha_beta(depth, -INF, INF, curr_best);
+            root_scores.clear();
+            int score = alpha_beta_root(depth, -INF, INF, curr_best, root_scores);
             if (stop_search) {
                 // Use best from previous completed iteration
                 if (prev_best.from != -1) {
@@ -381,6 +387,29 @@ public:
             prev_best = curr_best;
             best_score = score;
             depth_reached = depth;
+            last_complete_root_scores = root_scores;
+        }
+
+        // === OPENING VARIETY ===
+        // In the first 8 moves, if there are multiple moves within ~30cp of the best,
+        // randomly pick among them to create diverse play
+        if (opening_variety && pos.fullmove_number <= 8 && !last_complete_root_scores.empty()) {
+            sort(last_complete_root_scores.begin(), last_complete_root_scores.end(),
+                 [](auto &a, auto &b) { return a.second > b.second; });
+            int top_score = last_complete_root_scores[0].second;
+            int threshold = 40; // Allow moves within 40cp of best
+            vector<pair<Move, int>> good_moves;
+            for (auto &c : last_complete_root_scores) {
+                if (top_score - c.second <= threshold) {
+                    good_moves.push_back(c);
+                }
+            }
+            if (good_moves.size() > 1) {
+                uniform_int_distribution<int> dist(0, (int)good_moves.size() - 1);
+                int pick = dist(opening_rng);
+                best = good_moves[pick].first;
+                best_score = good_moves[pick].second;
+            }
         }
         
         // === SAFETY CHECK: Does our best move allow opponent to mate us? ===
@@ -490,6 +519,8 @@ private:
     int mate_probe_nodes = 0;
     Move last_move_white{};
     Move last_move_black{};
+    mt19937 opening_rng;
+    bool opening_variety = true;
 
     array<int, 64> pst_pawn{};
     array<int, 64> pst_knight{};
@@ -497,6 +528,7 @@ private:
     array<int, 64> pst_rook{};
     array<int, 64> pst_queen{};
     array<int, 64> pst_king{};
+    array<int, 64> pst_king_endgame{};
 
     int piece_value(int p) const {
         switch (piece_type((Piece)p)) {
@@ -1270,14 +1302,14 @@ private:
                     5, 5, 5, -5, -5, 5, 5, 5,
                     0, 0, 0, 0, 0, 0, 0, 0};
 
-        pst_knight = {-5, -4, -3, -3, -3, -3, -4, -5,
-                  -4, -2, 0, 0, 0, 0, -2, -4,
-                  -3, 0, 1, 2, 2, 1, 0, -3,
-                  -3, 1, 2, 2, 2, 2, 1, -3,
-                  -3, 0, 2, 2, 2, 2, 0, -3,
-                  -3, 1, 1, 2, 2, 1, 1, -3,
-                  -4, -2, 0, 1, 1, 0, -2, -4,
-                  -5, -4, -3, -3, -3, -3, -4, -5};
+        pst_knight = {-50, -40, -30, -30, -30, -30, -40, -50,
+                  -40, -20,  0,   0,   0,   0,  -20, -40,
+                  -30,  0,  10,  15,  15,  10,   0,  -30,
+                  -30,  5,  15,  20,  20,  15,   5,  -30,
+                  -30,  0,  15,  20,  20,  15,   0,  -30,
+                  -30,  5,  10,  15,  15,  10,   5,  -30,
+                  -40, -20,  0,   5,   5,   0,  -20, -40,
+                  -50, -40, -30, -30, -30, -30, -40, -50};
 
         pst_bishop = {-2, -1, -1, -1, -1, -1, -1, -2,
                   -1, 0, 0, 0, 0, 0, 0, -1,
@@ -1314,6 +1346,16 @@ private:
                     -1, -2, -2, -2, -2, -2, -2, -1,
                     2, 2, 0, 0, 0, 0, 2, 2,
                     2, 3, 1, 0, 0, 1, 3, 2};
+
+        // Endgame king PST: king should centralize
+        pst_king_endgame = {-50, -30, -20, -20, -20, -20, -30, -50,
+                            -30, -10,   0,   5,   5,   0, -10, -30,
+                            -20,   0,  10,  15,  15,  10,   0, -20,
+                            -20,   5,  15,  20,  20,  15,   5, -20,
+                            -20,   5,  15,  20,  20,  15,   5, -20,
+                            -20,   0,  10,  15,  15,  10,   0, -20,
+                            -30, -10,   0,   5,   5,   0, -10, -30,
+                            -50, -30, -20, -20, -20, -20, -30, -50};
     }
 
     char piece_to_char(Piece p) const {
@@ -1957,6 +1999,45 @@ private:
 
     int evaluate() {
         int score = 0;
+
+        // === GAME PHASE: determine if we're in endgame ===
+        // Sum non-pawn, non-king material to determine phase
+        int white_material = 0, black_material = 0;
+        int white_non_pawn = 0, black_non_pawn = 0;
+        bool white_has_queen = false, black_has_queen = false;
+        int wk_sq = -1, bk_sq = -1;
+
+        for (int sq = 0; sq < 64; ++sq) {
+            int p = pos.board[sq];
+            if (p == EMPTY) continue;
+            if (p == WK) { wk_sq = sq; continue; }
+            if (p == BK) { bk_sq = sq; continue; }
+            int val = 0;
+            switch (piece_type((Piece)p)) {
+                case WP: val = 100; break;
+                case WN: val = 320; break;
+                case WB: val = 330; break;
+                case WR: val = 500; break;
+                case WQ: val = 900; break;
+                default: break;
+            }
+            if (is_white((Piece)p)) {
+                white_material += val;
+                if (piece_type((Piece)p) != WP) white_non_pawn += val;
+                if (p == WQ) white_has_queen = true;
+            } else {
+                black_material += val;
+                if (piece_type((Piece)p) != WP) black_non_pawn += val;
+                if (p == BQ) black_has_queen = true;
+            }
+        }
+
+        // Phase: 0 = endgame, 256 = full middlegame
+        // Total non-pawn material at start: 2*(N+N+B+B+R+R+Q) = 2*(320+320+330+330+500+500+900) = 6400
+        int total_non_pawn = white_non_pawn + black_non_pawn;
+        int phase = clamp(total_non_pawn * 256 / 6400, 0, 256);
+        bool is_endgame = (phase < 100) || (!white_has_queen && !black_has_queen);
+
         for (int sq = 0; sq < 64; ++sq) {
             int p = pos.board[sq];
             if (p == EMPTY) continue;
@@ -1970,17 +2051,41 @@ private:
                     int rank = rank_of(sq);
                     if (white_piece && rank == 6) val += 500; // White pawn on 7th rank
                     if (!white_piece && rank == 1) val += 500; // Black pawn on 2nd rank
+                    // Endgame: passed pawns become more valuable
+                    if (is_endgame) {
+                        if (white_piece && rank >= 4) val += (rank - 3) * 40;
+                        if (!white_piece && rank <= 3) val += (4 - rank) * 40;
+                    }
                     break;
                 }
                 case WN: val = 320 + pst_knight[psq]; break;
                 case WB: val = 330 + pst_bishop[psq]; break;
                 case WR: val = 500 + pst_rook[psq]; break;
                 case WQ: val = 900 + pst_queen[psq]; break;
-                case WK: val = 20000 + pst_king[psq]; break;
+                case WK: {
+                    // Interpolate between middlegame and endgame king PST
+                    int mg_val = pst_king[psq];
+                    int eg_val = pst_king_endgame[psq];
+                    val = 20000 + (mg_val * phase + eg_val * (256 - phase)) / 256;
+                    break;
+                }
                 default: break;
             }
             if (p >= BP) val = -val;
             score += val;
+        }
+
+        // === TRADE INCENTIVE ===
+        // When ahead in material, prefer to keep pieces (don't trade)
+        // When behind, prefer to trade
+        int mat_diff = white_material - black_material;
+        int total_mat = white_material + black_material;
+        if (total_mat > 0) {
+            // Bonus proportional to advantage * remaining material
+            // If White is +500 with 3000 total: bonus = +500*3000/5000 = +300
+            // If White is +500 with 1000 total: bonus = +500*1000/5000 = +100
+            // This makes the engine prefer keeping material when ahead
+            score += mat_diff * total_mat / 5000;
         }
 
         int dev = 0;
@@ -2039,25 +2144,66 @@ private:
     // Evaluate king safety - especially f7/f2 weakness
     int evaluate_king_safety() {
         int safety = 0;
-        
-        // Find kings
+
+        // === GAME PHASE CHECK ===
+        // Count non-pawn material to detect endgame
+        int non_pawn_material = 0;
+        bool queens_on_board = false;
         int wk_sq = -1, bk_sq = -1;
         for (int sq = 0; sq < 64; ++sq) {
-            if (pos.board[sq] == WK) wk_sq = sq;
-            if (pos.board[sq] == BK) bk_sq = sq;
+            int p = pos.board[sq];
+            if (p == WK) { wk_sq = sq; continue; }
+            if (p == BK) { bk_sq = sq; continue; }
+            if (p == EMPTY) continue;
+            int pt = piece_type((Piece)p);
+            if (pt == WQ) queens_on_board = true;
+            if (pt != WP) {
+                switch (pt) {
+                    case WN: non_pawn_material += 320; break;
+                    case WB: non_pawn_material += 330; break;
+                    case WR: non_pawn_material += 500; break;
+                    case WQ: non_pawn_material += 900; break;
+                    default: break;
+                }
+            }
+        }
+
+        bool is_endgame = (non_pawn_material < 2000) || !queens_on_board;
+
+        // In the ENDGAME, king centralization is GOOD, not bad
+        // Also: drive enemy king to edge for mating
+        if (is_endgame) {
+            // King centralization bonus (closer to center = better)
+            if (wk_sq != -1) {
+                int wf = file_of(wk_sq), wr = rank_of(wk_sq);
+                int center_dist = max(abs(wf - 3), abs(wr - 3)); // 0=center, 3=corner
+                safety += (3 - center_dist) * 15; // Up to +45 for center
+            }
+            if (bk_sq != -1) {
+                int bf = file_of(bk_sq), br = rank_of(bk_sq);
+                int center_dist = max(abs(bf - 3), abs(br - 3));
+                safety -= (3 - center_dist) * 15;
+            }
+            // Kings proximity bonus: in endgame, winning side wants kings close
+            if (wk_sq != -1 && bk_sq != -1) {
+                int dist = abs(file_of(wk_sq) - file_of(bk_sq)) + abs(rank_of(wk_sq) - rank_of(bk_sq));
+                // Don't apply direction — let material advantage determine who benefits
+                // This just encourages the winning side's search to approach
+            }
+            return safety;
         }
         
-        // === CRITICAL: King in the center of the board is DEADLY ===
-        // King should be on rank 0/1 for white or rank 6/7 for black
-        // King in the middle (ranks 2-5) is extremely dangerous
+        // === MIDDLEGAME KING SAFETY ===
+        // Find kings (already found above)
         
         if (wk_sq != -1) {
             int wk_rank = rank_of(wk_sq);
             int wk_file = file_of(wk_sq);
             
-            // White king on ranks 2-5 (middle of board) = disaster
+            // King on ranks 2-5 but apply reduced penalty since we already
+            // handle endgame above
             if (wk_rank >= 2 && wk_rank <= 5) {
-                safety -= 300; // Huge penalty
+                safety -= 300; // Huge penalty in middlegame
                 // Even worse if in center files
                 if (wk_file >= 2 && wk_file <= 5) {
                     safety -= 200; // King in center = death
@@ -2077,9 +2223,8 @@ private:
             int bk_rank = rank_of(bk_sq);
             int bk_file = file_of(bk_sq);
             
-            // Black king on ranks 2-5 (middle of board) = disaster  
             if (bk_rank >= 2 && bk_rank <= 5) {
-                safety += 300; // Huge bonus for white (black king exposed)
+                safety += 300; // Huge bonus for white in middlegame (black king exposed)
                 // Even worse if in center files
                 if (bk_file >= 2 && bk_file <= 5) {
                     safety += 200;
@@ -2228,6 +2373,82 @@ private:
 
     int node_count = 0;
     
+    // Root-level alpha-beta that collects scores for all moves (for opening variety)
+    int alpha_beta_root(int depth, int alpha, int beta, Move &best, vector<pair<Move, int>> &root_scores) {
+        node_count++;
+        if (time_up()) return 0;
+
+        if (pos.halfmove_clock >= 100 || is_repetition() || is_insufficient_material()) {
+            int draw_score = evaluate() / 10;
+            draw_score = clamp(draw_score, -20, 20);
+            return draw_score;
+        }
+
+        bool in_check_now = in_check(pos.side_to_move);
+        auto moves = generate_legal_moves();
+        if (moves.empty()) {
+            if (in_check_now) return -MATE_SCORE + (100 - depth);
+            return 0;
+        }
+
+        sort(moves.begin(), moves.end(), [&](const Move &a, const Move &b) {
+            return move_score(a) > move_score(b);
+        });
+
+        int best_score = -INF;
+        root_scores.clear();
+
+        // Whether to collect all root move scores (for opening variety)
+        bool collect_all = opening_variety && pos.fullmove_number <= 8;
+
+        for (auto &m : moves) {
+            int pt_moved = piece_type((Piece)m.moved);
+            int see = see_score(m);
+            if ((pt_moved == WQ && see < -200) ||
+                (pt_moved == WR && see < -200) ||
+                ((pt_moved == WB || pt_moved == WN) && see < -150)) {
+                continue;
+            }
+
+            Undo u = make_move(m);
+
+            if (has_mate_in_one()) {
+                unmake_move(m, u);
+                continue;
+            }
+
+            bool gives_check = in_check(pos.side_to_move);
+            int extension = 0;
+            if (gives_check) {
+                bool checker_attacked = is_square_attacked(m.to, pos.side_to_move);
+                bool checker_defended = is_square_attacked(m.to, opposite(pos.side_to_move));
+                if (!checker_attacked || checker_defended) {
+                    extension = 1;
+                }
+            }
+
+            Move child_best;
+            // When collecting for variety, don't use tight alpha cutoff
+            // so more moves get real scores
+            int search_alpha = collect_all ? max(-INF, best_score - 50) : alpha;
+            int score = -alpha_beta(depth - 1 + extension, -beta, -search_alpha, child_best);
+
+            unmake_move(m, u);
+
+            root_scores.push_back({m, score});
+
+            if (stop_search) return 0;
+            if (score > best_score) {
+                best_score = score;
+                best = m;
+            }
+            if (score > alpha) alpha = score;
+            if (!collect_all && alpha >= beta) break;
+        }
+
+        return best_score;
+    }
+
     int alpha_beta(int depth, int alpha, int beta, Move &best) {
         node_count++;
         if (time_up()) return 0;
@@ -2258,8 +2479,12 @@ private:
         int best_score = -INF;
         
         for (auto &m : moves) {
-            // Basic blunder filter for queen moves
-            if (piece_type((Piece)m.moved) == WQ && see_score(m) < -200) {
+            // Blunder filter: skip moves that clearly lose material (SEE)
+            int pt_moved = piece_type((Piece)m.moved);
+            int see = see_score(m);
+            if ((pt_moved == WQ && see < -200) ||
+                (pt_moved == WR && see < -200) ||
+                ((pt_moved == WB || pt_moved == WN) && see < -150)) {
                 continue;
             }
             // Check BEFORE make_move while position state is correct!
@@ -2275,8 +2500,17 @@ private:
             }
             
             // === CHECK EXTENSION: If this move gives check, extend search ===
+            // Do NOT extend checks where the checking piece is hanging (suicide checks)
             bool gives_check = in_check(pos.side_to_move);
-            int extension = gives_check ? 1 : 0;
+            int extension = 0;
+            if (gives_check) {
+                bool checker_attacked = is_square_attacked(m.to, pos.side_to_move);
+                bool checker_defended = is_square_attacked(m.to, opposite(pos.side_to_move));
+                // Only extend if checking piece isn't simply captured
+                if (!checker_attacked || checker_defended) {
+                    extension = 1;
+                }
+            }
             
             Move child_best;
             int score = -alpha_beta(depth - 1 + extension, -beta, -alpha, child_best);
@@ -2306,14 +2540,24 @@ private:
                 }
             }
             
-            // === CRITICAL: Penalize king moves to center ===
+            // === Penalize king moves to center in MIDDLEGAME only ===
             if (pt == WK) {
-                int to_rank = rank_of(m.to);
-                int to_file = file_of(m.to);
-                if (to_rank >= 2 && to_rank <= 5) {
-                    score -= 500;
-                    if (to_file >= 2 && to_file <= 5) {
-                        score -= 300;
+                // Check if queens are on the board (middlegame indicator)
+                bool has_queen = false;
+                for (int sq = 0; sq < 64; ++sq) {
+                    if (pos.board[sq] == WQ || pos.board[sq] == BQ) {
+                        has_queen = true;
+                        break;
+                    }
+                }
+                if (has_queen) {
+                    int to_rank = rank_of(m.to);
+                    int to_file = file_of(m.to);
+                    if (to_rank >= 2 && to_rank <= 5) {
+                        score -= 500;
+                        if (to_file >= 2 && to_file <= 5) {
+                            score -= 300;
+                        }
                     }
                 }
             }
