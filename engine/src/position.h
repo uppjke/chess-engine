@@ -23,6 +23,10 @@ public:
     bool is_repetition() const;
     bool is_insufficient_material() const;
 
+    // Null move (for null move pruning)
+    int make_null_move();
+    void unmake_null_move(int old_ep);
+
     // Public state
     Position pos;
     HashKeys keys;

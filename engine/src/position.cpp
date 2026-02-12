@@ -295,6 +295,22 @@ void Board::update_hash() {
     pos.hash = h;
 }
 
+int Board::make_null_move() {
+    int old_ep = pos.ep_square;
+    pos.side_to_move = opposite(pos.side_to_move);
+    pos.ep_square = -1;
+    update_hash();
+    hash_history.push_back(pos.hash);
+    return old_ep;
+}
+
+void Board::unmake_null_move(int old_ep) {
+    if (!hash_history.empty()) hash_history.pop_back();
+    pos.side_to_move = opposite(pos.side_to_move);
+    pos.ep_square = old_ep;
+    update_hash();
+}
+
 bool Board::is_repetition() const {
     if (hash_history.empty()) return false;
     uint64_t h = pos.hash;

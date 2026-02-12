@@ -453,6 +453,72 @@ static int evaluate_development_quality(Board &board) {
 }
 
 // ========================
+// Pawn Structure
+// ========================
+
+static int evaluate_pawn_structure(const Board &board) {
+    int score = 0;
+
+    // Count pawns per file
+    int white_pawns[8] = {};
+    int black_pawns[8] = {};
+    for (int sq = 0; sq < 64; ++sq) {
+        int p = board.pos.board[sq];
+        if (p == WP) white_pawns[file_of(sq)]++;
+        else if (p == BP) black_pawns[file_of(sq)]++;
+    }
+
+    // Doubled pawns
+    for (int f = 0; f < 8; ++f) {
+        if (white_pawns[f] > 1) score -= (white_pawns[f] - 1) * 15;
+        if (black_pawns[f] > 1) score += (black_pawns[f] - 1) * 15;
+    }
+
+    // Isolated pawns
+    for (int f = 0; f < 8; ++f) {
+        if (white_pawns[f] > 0) {
+            bool has_neighbor = (f > 0 && white_pawns[f-1] > 0) || (f < 7 && white_pawns[f+1] > 0);
+            if (!has_neighbor) score -= 12 * white_pawns[f];
+        }
+        if (black_pawns[f] > 0) {
+            bool has_neighbor = (f > 0 && black_pawns[f-1] > 0) || (f < 7 && black_pawns[f+1] > 0);
+            if (!has_neighbor) score += 12 * black_pawns[f];
+        }
+    }
+
+    // Passed pawns
+    for (int sq = 0; sq < 64; ++sq) {
+        int p = board.pos.board[sq];
+        if (p == WP) {
+            int f = file_of(sq);
+            int r = rank_of(sq);
+            bool passed = true;
+            for (int rr = r + 1; rr < 8 && passed; ++rr)
+                for (int ff = std::max(0, f-1); ff <= std::min(7, f+1); ++ff)
+                    if (board.pos.board[make_sq(ff, rr)] == BP) { passed = false; break; }
+            if (passed) {
+                // Bonus grows quadratically with rank
+                static const int passed_bonus[] = {0, 5, 10, 20, 35, 60, 100, 0};
+                score += passed_bonus[r];
+            }
+        } else if (p == BP) {
+            int f = file_of(sq);
+            int r = rank_of(sq);
+            bool passed = true;
+            for (int rr = r - 1; rr >= 0 && passed; --rr)
+                for (int ff = std::max(0, f-1); ff <= std::min(7, f+1); ++ff)
+                    if (board.pos.board[make_sq(ff, rr)] == WP) { passed = false; break; }
+            if (passed) {
+                static const int passed_bonus[] = {0, 100, 60, 35, 20, 10, 5, 0};
+                score -= passed_bonus[r];
+            }
+        }
+    }
+
+    return score;
+}
+
+// ========================
 // Main Evaluation
 // ========================
 
@@ -661,6 +727,20 @@ int evaluate(Board &board) {
         if (p == WR && rank_of(sq) == 6) score += 30;
         if (p == BR && rank_of(sq) == 1) score -= 30;
     }
+
+    // === BISHOP PAIR ===
+    {
+        int wb = 0, bb = 0;
+        for (int sq = 0; sq < 64; ++sq) {
+            if (pos.board[sq] == WB) wb++;
+            if (pos.board[sq] == BB) bb++;
+        }
+        if (wb >= 2) score += 30;
+        if (bb >= 2) score -= 30;
+    }
+
+    // === PAWN STRUCTURE ===
+    score += evaluate_pawn_structure(board);
 
     return (pos.side_to_move == WHITE) ? score : -score;
 }
