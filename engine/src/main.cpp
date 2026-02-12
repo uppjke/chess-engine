@@ -372,7 +372,7 @@ public:
         for (int depth = 1; depth <= max_depth; ++depth) {
             Move curr_best;
             root_scores.clear();
-            int score = alpha_beta_root(depth, -INF, INF, curr_best, root_scores);
+            int score = alpha_beta_root(depth, -INF, INF, curr_best, root_scores, prev_best);
             if (stop_search) {
                 // Use best from previous completed iteration
                 if (prev_best.from != -1) {
@@ -388,6 +388,10 @@ public:
             best_score = score;
             depth_reached = depth;
             last_complete_root_scores = root_scores;
+            // UCI info output
+            cout << "info depth " << depth << " score cp " << score
+                 << " nodes " << node_count
+                 << " pv " << move_to_uci(curr_best) << endl;
         }
 
         // === OPENING VARIETY ===
@@ -740,12 +744,20 @@ private:
             int their_value = piece_value(m.captured);
             bool is_defended = is_square_attacked(m.to, opp);
             
+            // For king captures, don't use king's piece value (20000) as attacker cost
+            // King can't be "lost" in a capture — legality already checked
+            int effective_our_value = (piece_type((Piece)m.moved) == WK) ? 0 : our_value;
+            
             if (!is_defended) {
                 // Free capture - use normal MVV-LVA
-                score += 10 * their_value - our_value;
+                score += 10 * their_value - effective_our_value;
             } else {
                 // Target is defended - calculate if trade is good
-                if (our_value <= their_value + 50) {
+                if (piece_type((Piece)m.moved) == WK) {
+                    // King capturing defended piece — risky but legal
+                    // Don't give huge penalty; legality is already checked
+                    score += their_value;
+                } else if (our_value <= their_value + 50) {
                     // Good or equal trade (e.g., knight takes bishop)
                     score += their_value - our_value + 100;
                 } else {
@@ -2006,6 +2018,7 @@ private:
         int white_non_pawn = 0, black_non_pawn = 0;
         bool white_has_queen = false, black_has_queen = false;
         int wk_sq = -1, bk_sq = -1;
+        int wq_sq = -1, bq_sq = -1;
 
         for (int sq = 0; sq < 64; ++sq) {
             int p = pos.board[sq];
@@ -2024,11 +2037,11 @@ private:
             if (is_white((Piece)p)) {
                 white_material += val;
                 if (piece_type((Piece)p) != WP) white_non_pawn += val;
-                if (p == WQ) white_has_queen = true;
+                if (p == WQ) { white_has_queen = true; wq_sq = sq; }
             } else {
                 black_material += val;
                 if (piece_type((Piece)p) != WP) black_non_pawn += val;
-                if (p == BQ) black_has_queen = true;
+                if (p == BQ) { black_has_queen = true; bq_sq = sq; }
             }
         }
 
@@ -2125,7 +2138,65 @@ private:
         }
 
         score += dev;
-        
+
+        // === QUEEN OUT OF POSITION ===
+        // Penalize queen far from own king when pieces are undeveloped
+        // This prevents greedy pawn-grabbing like Qxa2 with Bc8 still home
+        if (phase > 80) { // Only in middlegame
+            // White queen out of position
+            if (wq_sq != -1 && wk_sq != -1) {
+                int q_dist = abs(file_of(wq_sq) - file_of(wk_sq)) + abs(rank_of(wq_sq) - rank_of(wk_sq));
+                if (q_dist > 4) {
+                    int undeveloped = 0;
+                    if (pos.board[make_sq(1,0)] == WN) undeveloped++;
+                    if (pos.board[make_sq(6,0)] == WN) undeveloped++;
+                    if (pos.board[make_sq(2,0)] == WB) undeveloped++;
+                    if (pos.board[make_sq(5,0)] == WB) undeveloped++;
+                    int excess = q_dist - 4;
+                    int penalty = excess * (20 + undeveloped * 35);
+                    if (black_has_queen) penalty += excess * 12;
+                    // Queen deep in opponent's territory (back 2 ranks) = pawn grabbing
+                    int wq_rank = rank_of(wq_sq);
+                    if (wq_rank >= 6) penalty += 100 + undeveloped * 80;
+                    score -= penalty;
+                }
+            }
+
+            // Black queen out of position
+            if (bq_sq != -1 && bk_sq != -1) {
+                int q_dist = abs(file_of(bq_sq) - file_of(bk_sq)) + abs(rank_of(bq_sq) - rank_of(bk_sq));
+                if (q_dist > 4) {
+                    int undeveloped = 0;
+                    if (pos.board[make_sq(1,7)] == BN) undeveloped++;
+                    if (pos.board[make_sq(6,7)] == BN) undeveloped++;
+                    if (pos.board[make_sq(2,7)] == BB) undeveloped++;
+                    if (pos.board[make_sq(5,7)] == BB) undeveloped++;
+                    int excess = q_dist - 4;
+                    int penalty = excess * (20 + undeveloped * 35);
+                    if (white_has_queen) penalty += excess * 12;
+                    // Queen deep in opponent's territory (back 2 ranks) = pawn grabbing
+                    int bq_rank = rank_of(bq_sq);
+                    if (bq_rank <= 1) penalty += 100 + undeveloped * 80;
+                    score += penalty; // Positive = bad for black = good for white
+                }
+            }
+        }
+
+        // === UNDEVELOPED PIECES IN MIDDLEGAME ===
+        // Minor pieces still on starting squares after the opening are very bad
+        // This penalty grows with move number - the longer they sit, the worse
+        if (pos.fullmove_number > 8 && phase > 60) {
+            int pen = min(60, 10 + (pos.fullmove_number - 8) * 4);
+            if (pos.board[make_sq(1,0)] == WN) score -= pen;
+            if (pos.board[make_sq(6,0)] == WN) score -= pen;
+            if (pos.board[make_sq(2,0)] == WB) score -= pen;
+            if (pos.board[make_sq(5,0)] == WB) score -= pen;
+            if (pos.board[make_sq(1,7)] == BN) score += pen;
+            if (pos.board[make_sq(6,7)] == BN) score += pen;
+            if (pos.board[make_sq(2,7)] == BB) score += pen;
+            if (pos.board[make_sq(5,7)] == BB) score += pen;
+        }
+
         // === KING SAFETY ===
         int king_safety = evaluate_king_safety();
         score += king_safety;
@@ -2148,7 +2219,7 @@ private:
         // === GAME PHASE CHECK ===
         // Count non-pawn material to detect endgame
         int non_pawn_material = 0;
-        bool queens_on_board = false;
+        bool white_has_queen = false, black_has_queen = false;
         int wk_sq = -1, bk_sq = -1;
         for (int sq = 0; sq < 64; ++sq) {
             int p = pos.board[sq];
@@ -2156,7 +2227,8 @@ private:
             if (p == BK) { bk_sq = sq; continue; }
             if (p == EMPTY) continue;
             int pt = piece_type((Piece)p);
-            if (pt == WQ) queens_on_board = true;
+            if (p == WQ) white_has_queen = true;
+            if (p == BQ) black_has_queen = true;
             if (pt != WP) {
                 switch (pt) {
                     case WN: non_pawn_material += 320; break;
@@ -2168,7 +2240,7 @@ private:
             }
         }
 
-        bool is_endgame = (non_pawn_material < 2000) || !queens_on_board;
+        bool is_endgame = (non_pawn_material < 2000) || (!white_has_queen && !black_has_queen);
 
         // In the ENDGAME, king centralization is GOOD, not bad
         // Also: drive enemy king to edge for mating
@@ -2195,6 +2267,54 @@ private:
         
         // === MIDDLEGAME KING SAFETY ===
         // Find kings (already found above)
+
+        // === PAWN SHIELD FOR CASTLED KING ===
+        // White kingside castle (king on g1 or f1)
+        if (wk_sq != -1) {
+            int wkf = file_of(wk_sq), wkr = rank_of(wk_sq);
+            if (wkr == 0 && (wkf == 6 || wkf == 5)) {
+                // Check f2, g2, h2 pawns
+                if (pos.board[make_sq(5, 1)] != WP) safety -= 30; // f2 missing
+                if (pos.board[make_sq(6, 1)] != WP) safety -= 30; // g2 missing
+                if (pos.board[make_sq(7, 1)] != WP) safety -= 20; // h2 missing
+                // Advanced pawns weaken shield
+                if (pos.board[make_sq(5, 2)] == WP && pos.board[make_sq(5, 1)] != WP) safety -= 15; // f3 without f2
+                if (pos.board[make_sq(6, 2)] == WP && pos.board[make_sq(6, 1)] != WP) safety -= 10; // g3 without g2
+                // Broken shield + enemy queen = very dangerous
+                if (black_has_queen) {
+                    if (pos.board[make_sq(5, 1)] != WP) safety -= 25;
+                    if (pos.board[make_sq(6, 1)] != WP) safety -= 25;
+                }
+            }
+            // White queenside castle (king on c1 or b1)
+            if (wkr == 0 && (wkf == 2 || wkf == 1)) {
+                if (pos.board[make_sq(0, 1)] != WP) safety -= 20;
+                if (pos.board[make_sq(1, 1)] != WP) safety -= 30;
+                if (pos.board[make_sq(2, 1)] != WP) safety -= 30;
+                if (black_has_queen && pos.board[make_sq(2, 1)] != WP) safety -= 20;
+            }
+        }
+        // Black kingside castle (king on g8 or f8)
+        if (bk_sq != -1) {
+            int bkf = file_of(bk_sq), bkr = rank_of(bk_sq);
+            if (bkr == 7 && (bkf == 6 || bkf == 5)) {
+                if (pos.board[make_sq(5, 6)] != BP) safety += 30; // f7 missing
+                if (pos.board[make_sq(6, 6)] != BP) safety += 30; // g7 missing
+                if (pos.board[make_sq(7, 6)] != BP) safety += 20; // h7 missing
+                if (pos.board[make_sq(5, 5)] == BP && pos.board[make_sq(5, 6)] != BP) safety += 15; // f6 without f7
+                if (pos.board[make_sq(6, 5)] == BP && pos.board[make_sq(6, 6)] != BP) safety += 10; // g6 without g7
+                if (white_has_queen) {
+                    if (pos.board[make_sq(5, 6)] != BP) safety += 25;
+                    if (pos.board[make_sq(6, 6)] != BP) safety += 25;
+                }
+            }
+            if (bkr == 7 && (bkf == 2 || bkf == 1)) {
+                if (pos.board[make_sq(0, 6)] != BP) safety += 20;
+                if (pos.board[make_sq(1, 6)] != BP) safety += 30;
+                if (pos.board[make_sq(2, 6)] != BP) safety += 30;
+                if (white_has_queen && pos.board[make_sq(2, 6)] != BP) safety += 20;
+            }
+        }
         
         if (wk_sq != -1) {
             int wk_rank = rank_of(wk_sq);
@@ -2374,7 +2494,7 @@ private:
     int node_count = 0;
     
     // Root-level alpha-beta that collects scores for all moves (for opening variety)
-    int alpha_beta_root(int depth, int alpha, int beta, Move &best, vector<pair<Move, int>> &root_scores) {
+    int alpha_beta_root(int depth, int alpha, int beta, Move &best, vector<pair<Move, int>> &root_scores, const Move &prev_best) {
         node_count++;
         if (time_up()) return 0;
 
@@ -2395,6 +2515,21 @@ private:
             return move_score(a) > move_score(b);
         });
 
+        // PV move ordering: put the previous iteration's best move first
+        if (prev_best.from != -1) {
+            for (size_t i = 0; i < moves.size(); ++i) {
+                if (moves[i].from == prev_best.from && moves[i].to == prev_best.to &&
+                    moves[i].promotion == prev_best.promotion) {
+                    if (i > 0) {
+                        Move tmp = moves[i];
+                        moves.erase(moves.begin() + i);
+                        moves.insert(moves.begin(), tmp);
+                    }
+                    break;
+                }
+            }
+        }
+
         int best_score = -INF;
         root_scores.clear();
 
@@ -2402,14 +2537,6 @@ private:
         bool collect_all = opening_variety && pos.fullmove_number <= 8;
 
         for (auto &m : moves) {
-            int pt_moved = piece_type((Piece)m.moved);
-            int see = see_score(m);
-            if ((pt_moved == WQ && see < -200) ||
-                (pt_moved == WR && see < -200) ||
-                ((pt_moved == WB || pt_moved == WN) && see < -150)) {
-                continue;
-            }
-
             Undo u = make_move(m);
 
             if (has_mate_in_one()) {
@@ -2427,13 +2554,51 @@ private:
                 }
             }
 
+            // Blunder filter: skip moves that clearly lose material (SEE)
+            // EXEMPT checking moves — SEE is unreliable for checks (king adjacency)
+            if (!gives_check) {
+                int pt_moved = piece_type((Piece)m.moved);
+                int see = see_score(m);
+                if ((pt_moved == WQ && see < -200) ||
+                    (pt_moved == WR && see < -200) ||
+                    ((pt_moved == WB || pt_moved == WN) && see < -150)) {
+                    unmake_move(m, u);
+                    continue;
+                }
+            }
+
             Move child_best;
-            // When collecting for variety, don't use tight alpha cutoff
-            // so more moves get real scores
             int search_alpha = collect_all ? max(-INF, best_score - 50) : alpha;
             int score = -alpha_beta(depth - 1 + extension, -beta, -search_alpha, child_best);
 
             unmake_move(m, u);
+
+            // Penalize queen grabbing pawns deep in opponent's territory
+            // This is a SEARCH-LEVEL penalty to discourage pawn-grabbing excursions
+            {
+                int pt = piece_type((Piece)m.moved);
+                if (pt == WQ && m.captured != EMPTY && piece_type((Piece)m.captured) == WP) {
+                    int to_rank = rank_of(m.to);
+                    bool queen_is_white = is_white((Piece)m.moved);
+                    bool is_deep_invasion = queen_is_white ? (to_rank >= 6) : (to_rank <= 1);
+                    if (is_deep_invasion) {
+                        // Count undeveloped minor pieces
+                        int undeveloped = 0;
+                        if (queen_is_white) {
+                            if (pos.board[make_sq(1,0)] == WN) undeveloped++;
+                            if (pos.board[make_sq(6,0)] == WN) undeveloped++;
+                            if (pos.board[make_sq(2,0)] == WB) undeveloped++;
+                            if (pos.board[make_sq(5,0)] == WB) undeveloped++;
+                        } else {
+                            if (pos.board[make_sq(1,7)] == BN) undeveloped++;
+                            if (pos.board[make_sq(6,7)] == BN) undeveloped++;
+                            if (pos.board[make_sq(2,7)] == BB) undeveloped++;
+                            if (pos.board[make_sq(5,7)] == BB) undeveloped++;
+                        }
+                        score -= 150 + undeveloped * 100;
+                    }
+                }
+            }
 
             root_scores.push_back({m, score});
 
@@ -2479,14 +2644,6 @@ private:
         int best_score = -INF;
         
         for (auto &m : moves) {
-            // Blunder filter: skip moves that clearly lose material (SEE)
-            int pt_moved = piece_type((Piece)m.moved);
-            int see = see_score(m);
-            if ((pt_moved == WQ && see < -200) ||
-                (pt_moved == WR && see < -200) ||
-                ((pt_moved == WB || pt_moved == WN) && see < -150)) {
-                continue;
-            }
             // Check BEFORE make_move while position state is correct!
             bool is_reverse = is_reverse_of_last(m);
             bool is_repeat = is_repeat_piece_move(m);
@@ -2509,6 +2666,19 @@ private:
                 // Only extend if checking piece isn't simply captured
                 if (!checker_attacked || checker_defended) {
                     extension = 1;
+                }
+            }
+
+            // Blunder filter: skip moves that clearly lose material (SEE)
+            // EXEMPT checking moves — SEE is unreliable for checks
+            if (!gives_check) {
+                int pt_moved = piece_type((Piece)m.moved);
+                int see = see_score(m);
+                if ((pt_moved == WQ && see < -200) ||
+                    (pt_moved == WR && see < -200) ||
+                    ((pt_moved == WB || pt_moved == WN) && see < -150)) {
+                    unmake_move(m, u);
+                    continue;
                 }
             }
             
@@ -2539,6 +2709,28 @@ private:
                     }
                 }
             }
+
+            // Penalize queen grabbing pawns deep in opponent's territory
+            if (pt == WQ && m.captured != EMPTY && piece_type((Piece)m.captured) == WP) {
+                int to_rank = rank_of(m.to);
+                bool queen_is_white = is_white((Piece)m.moved);
+                bool is_deep_invasion = queen_is_white ? (to_rank >= 6) : (to_rank <= 1);
+                if (is_deep_invasion) {
+                    int undeveloped = 0;
+                    if (queen_is_white) {
+                        if (pos.board[make_sq(1,0)] == WN) undeveloped++;
+                        if (pos.board[make_sq(6,0)] == WN) undeveloped++;
+                        if (pos.board[make_sq(2,0)] == WB) undeveloped++;
+                        if (pos.board[make_sq(5,0)] == WB) undeveloped++;
+                    } else {
+                        if (pos.board[make_sq(1,7)] == BN) undeveloped++;
+                        if (pos.board[make_sq(6,7)] == BN) undeveloped++;
+                        if (pos.board[make_sq(2,7)] == BB) undeveloped++;
+                        if (pos.board[make_sq(5,7)] == BB) undeveloped++;
+                    }
+                    score -= 150 + undeveloped * 100;
+                }
+            }
             
             // === Penalize king moves to center in MIDDLEGAME only ===
             if (pt == WK) {
@@ -2551,12 +2743,18 @@ private:
                     }
                 }
                 if (has_queen) {
-                    int to_rank = rank_of(m.to);
-                    int to_file = file_of(m.to);
-                    if (to_rank >= 2 && to_rank <= 5) {
-                        score -= 500;
-                        if (to_file >= 2 && to_file <= 5) {
-                            score -= 300;
+                    // Don't penalize king captures of major pieces (queen, rook)
+                    // — capturing a queen/rook is ALWAYS worth moving to the center
+                    int cap_value = piece_type((Piece)m.captured);
+                    bool captures_major = (cap_value == WQ || cap_value == WR);
+                    if (!captures_major) {
+                        int to_rank = rank_of(m.to);
+                        int to_file = file_of(m.to);
+                        if (to_rank >= 2 && to_rank <= 5) {
+                            score -= 500;
+                            if (to_file >= 2 && to_file <= 5) {
+                                score -= 300;
+                            }
                         }
                     }
                 }
@@ -2588,13 +2786,41 @@ private:
 
     int quiescence(int alpha, int beta) {
         if (time_up()) return 0;
+
+        bool in_check_now = in_check(pos.side_to_move);
+
+        // === CRITICAL: When in check, generate ALL legal moves ===
+        // Without this, quiescence misses forced mates like Qf7+ Kh8 Qg8#
+        // because Kh8 is a non-capture move
+        if (in_check_now) {
+            auto moves = generate_legal_moves();
+            if (moves.empty()) {
+                return -MATE_SCORE; // Checkmate
+            }
+            // Search all moves (we're in check, must respond)
+            int best_score = -INF;
+            for (auto &m : moves) {
+                Undo u = make_move(m);
+                int score = -quiescence(-beta, -alpha);
+                unmake_move(m, u);
+                if (stop_search) return 0;
+                if (score > best_score) best_score = score;
+                if (score > alpha) alpha = score;
+                if (alpha >= beta) return beta;
+            }
+            return best_score;
+        }
+
+        // Normal quiescence (not in check): stand-pat + captures only
         int stand = evaluate();
         if (stand >= beta) return beta;
         if (stand > alpha) alpha = stand;
         
         // Delta pruning: if we're very far behind, don't search
+        // Use fail-soft: return stand (true eval) instead of alpha (inherited window)
+        // This prevents inflated scores when searching after large captures (e.g., queen capture)
         int delta = 900; // queen value
-        if (stand + delta < alpha) return alpha;
+        if (stand + delta < alpha) return stand;
 
         vector<Move> moves;
         generate_pseudo_moves(moves);
