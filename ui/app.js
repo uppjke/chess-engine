@@ -258,7 +258,7 @@ function updateGameStatus() {
   } else if (isInsufficientMaterial()) {
     text = 'Ничья (недостаточно фигур)';
     state = 'warn';
-  } else if (legalMoves.size === 0) {
+  } else if (legalMovesFresh && legalMoves.size === 0) {
     if (isKingInCheck(sideToMove)) {
       text = 'Мат';
       state = 'danger';

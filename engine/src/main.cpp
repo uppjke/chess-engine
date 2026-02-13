@@ -50,6 +50,11 @@ int main() {
 
             Move best = engine.search_bestmove(max_depth, time_ms);
             cout << "bestmove " << move_to_uci(best) << endl;
+        } else if (line == "legal") {
+            auto moves = engine.legal_moves_uci();
+            cout << "legal";
+            for (const auto &m : moves) cout << " " << m;
+            cout << endl;
         } else if (line == "quit") {
             break;
         } else if (line == "d") {

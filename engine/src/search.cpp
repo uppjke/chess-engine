@@ -397,7 +397,13 @@ bool Searcher::has_mate_in_one(Board &board) {
 int Searcher::mate_search(Board &board, int depth, bool maximizing) {
     mate_search_nodes++;
     if (mate_search_nodes > MATE_SEARCH_NODE_LIMIT) return 0;
-    if (time_up()) return 0;
+    // Direct time check (bypass throttled time_up)
+    if ((mate_search_nodes & 255) == 0) {
+        auto now = chrono::steady_clock::now();
+        int elapsed = (int)chrono::duration_cast<chrono::milliseconds>(now - search_start).count();
+        if (elapsed >= time_limit) { stop_search = true; return 0; }
+    }
+    if (stop_search) return 0;
     if (depth <= 0) return 0;
 
     auto moves = generate_legal_moves(board);
@@ -461,8 +467,14 @@ bool Searcher::opponent_has_mate_in_one(Board &board) {
 
 bool Searcher::can_force_mate(Board &board, int plies) {
     if (plies <= 0) return false;
-    if (time_up()) return false;
     if (++mate_probe_nodes > MATE_PROBE_LIMIT) return false;
+    // Direct time check (bypass throttled time_up)
+    if ((mate_probe_nodes & 255) == 0) {
+        auto now = chrono::steady_clock::now();
+        int elapsed = (int)chrono::duration_cast<chrono::milliseconds>(now - search_start).count();
+        if (elapsed >= time_limit) { stop_search = true; return false; }
+    }
+    if (stop_search) return false;
 
     auto moves = generate_legal_moves(board);
     if (moves.empty()) return false;
@@ -981,11 +993,16 @@ Move Searcher::search_bestmove(Board &board, int max_depth, int time_limit_ms) {
     }
 
     // === SAFETY CHECK: mate in 1/2 ===
-    if (best.from != -1 && !stop_search) {
+    auto time_remaining = [&]() -> int {
+        auto now = chrono::steady_clock::now();
+        return time_limit - (int)chrono::duration_cast<chrono::milliseconds>(now - search_start).count();
+    };
+
+    if (best.from != -1 && !stop_search && time_remaining() > time_limit * 2 / 5) {
         Undo u = board.make_move(best);
         bool allows_mate1 = opponent_has_mate_in_one(board);
         int opp_mate = 0;
-        if (!allows_mate1) {
+        if (!allows_mate1 && time_remaining() > time_limit / 3) {
             opp_mate = opponent_has_mate_in_n(board, 2);
         }
         if (allows_mate1 || opp_mate >= MATE_SCORE - 20) {
@@ -995,15 +1012,18 @@ Move Searcher::search_bestmove(Board &board, int max_depth, int time_limit_ms) {
             Move safe_best;
             int safe_score = -INF;
             for (auto &m : moves) {
+                if (time_remaining() <= 20) break;
                 Undo u2 = board.make_move(m);
                 bool m_allows_mate1 = opponent_has_mate_in_one(board);
                 int m_opp_mate = m_allows_mate1 ? MATE_SCORE : opponent_has_mate_in_n(board, 2);
                 int score;
                 if (m_allows_mate1 || m_opp_mate >= MATE_SCORE - 20) {
                     score = -MATE_SCORE;
-                } else {
+                } else if (time_remaining() > 20) {
                     Move child_best;
                     score = -alpha_beta(board, 3, -INF, INF, child_best, 0);
+                } else {
+                    score = 0;
                 }
                 board.unmake_move(m, u2);
                 if (score > safe_score) { safe_score = score; safe_best = m; }
@@ -1014,14 +1034,14 @@ Move Searcher::search_bestmove(Board &board, int max_depth, int time_limit_ms) {
         }
     }
 
-    if (best.from != -1 && !stop_search) {
+    if (best.from != -1 && !stop_search && time_remaining() > time_limit * 2 / 5) {
         if (is_mate_trap(board, best, MATE_TRAP_PLIES)) {
             auto moves = generate_legal_moves(board);
             Move alt_best = best;
             int alt_score = -INF;
             int alt_depth = max(1, min(3, depth_reached - 1));
             for (auto &m : moves) {
-                if (time_up()) break;
+                if (time_up() || time_remaining() <= 20) break;
                 if (is_mate_trap(board, m, MATE_TRAP_PLIES)) continue;
                 Undo u = board.make_move(m);
                 Move child_best;
