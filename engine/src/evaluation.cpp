@@ -178,119 +178,17 @@ void init_pst_tables() {
     pst_king_endgame = pst_king_eg;
 }
 
-// ========================
-// Threat & Tactical Evaluation
-// ========================
-
-static bool is_knight_fork_threat(const Board &board, int knight_sq, Side attacker) {
-    int king_target = (attacker == WHITE) ? BK : WK;
-    int queen_target = (attacker == WHITE) ? BQ : WQ;
-    int rook_target = (attacker == WHITE) ? BR : WR;
-
-    bool attacks_king = false;
-    bool attacks_queen = false;
-    bool attacks_rook = false;
-
-    static const int knight_offsets[8][2] = {{1,2},{2,1},{2,-1},{1,-2},{-1,-2},{-2,-1},{-2,1},{-1,2}};
-    int f = file_of(knight_sq);
-    int r = rank_of(knight_sq);
-
-    for (auto &o : knight_offsets) {
-        int nf = f + o[0];
-        int nr = r + o[1];
-        if (nf < 0 || nf > 7 || nr < 0 || nr > 7) continue;
-        int target_sq = make_sq(nf, nr);
-        int p = board.pos.board[target_sq];
-        if (p == king_target) attacks_king = true;
-        if (p == queen_target) attacks_queen = true;
-        if (p == rook_target) attacks_rook = true;
-    }
-
-    return attacks_king && (attacks_queen || attacks_rook);
-}
-
-static int count_knight_fork_threats(Board &board, Side attacker) {
-    int forks = 0;
-    int knight_piece = (attacker == WHITE) ? WN : BN;
-
-    for (int sq = 0; sq < 64; ++sq) {
-        if (board.pos.board[sq] == knight_piece) {
-            static const int knight_offsets[8][2] = {{1,2},{2,1},{2,-1},{1,-2},{-1,-2},{-2,-1},{-2,1},{-1,2}};
-            int f = file_of(sq);
-            int r = rank_of(sq);
-
-            for (auto &o : knight_offsets) {
-                int nf = f + o[0];
-                int nr = r + o[1];
-                if (nf < 0 || nf > 7 || nr < 0 || nr > 7) continue;
-                int target_sq = make_sq(nf, nr);
-                int target = board.pos.board[target_sq];
-                if (target == EMPTY ||
-                    (attacker == WHITE && is_black((Piece)target)) ||
-                    (attacker == BLACK && is_white((Piece)target))) {
-                    int orig = board.pos.board[target_sq];
-                    board.pos.board[sq] = EMPTY;
-                    board.pos.board[target_sq] = knight_piece;
-                    if (is_knight_fork_threat(board, target_sq, attacker)) {
-                        forks++;
-                    }
-                    board.pos.board[target_sq] = orig;
-                    board.pos.board[sq] = knight_piece;
-                }
-            }
-        }
-    }
-    return forks;
-}
-
-static int evaluate_hanging_pieces(Board &board) {
-    int score = 0;
-    for (int sq = 0; sq < 64; ++sq) {
-        int p = board.pos.board[sq];
-        if (p == EMPTY) continue;
-
-        bool is_white_piece = is_white((Piece)p);
-        Side owner = is_white_piece ? WHITE : BLACK;
-        Side attacker = is_white_piece ? BLACK : WHITE;
-
-        int pt = piece_type((Piece)p);
-        if (pt == WP || pt == WK) continue;
-
-        bool attacked = board.is_square_attacked(sq, attacker);
-        bool defended = board.is_square_attacked(sq, owner);
-
-        if (attacked && !defended) {
-            int val = piece_value(p);
-            bool can_move_away = (owner == board.pos.side_to_move);
-            int penalty = can_move_away ? val / 4 : val / 2;
-            if (is_white_piece) {
-                score -= penalty;
-            } else {
-                score += penalty;
-            }
-        }
-    }
-    return score;
-}
-
-static int evaluate_threats(Board &board) {
-    int score = 0;
-    int white_forks = count_knight_fork_threats(board, WHITE);
-    int black_forks = count_knight_fork_threats(board, BLACK);
-    score += white_forks * 300;
-    score -= black_forks * 300;
-    score += evaluate_hanging_pieces(board);
-    return score;
-}
+// (Threat evaluation removed for speed — search handles tactics)
 
 // ========================
 // King Safety — attack zone counting
 // ========================
 
-static int evaluate_king_safety(Board &board, int wk_sq, int bk_sq,
+static int evaluate_king_safety(const Board &board, int wk_sq, int bk_sq,
                                  bool white_has_queen, bool black_has_queen,
                                  int phase) {
     int safety = 0;
+    const auto &pos = board.pos;
     bool is_endgame = phase < 80;
 
     // In endgame, king should centralize
@@ -308,130 +206,89 @@ static int evaluate_king_safety(Board &board, int wk_sq, int bk_sq,
         return safety;
     }
 
-    // === ATTACK ZONE EVALUATION ===
-    // Count attackers near each king
-    static const int king_zone_offsets[16][2] = {
-        {-2,-1},{-2,0},{-2,1},
-        {-1,-2},{-1,-1},{-1,0},{-1,1},{-1,2},
-        {0,-2},{0,-1},{0,1},{0,2},
-        {1,-2},{1,-1},{1,0},{1,1}
-    };
-
-    // White king safety (attacks by black)
+    // === PAWN SHIELD + OPEN FILE BASED KING SAFETY (no is_square_attacked) ===
     if (wk_sq != -1) {
         int wkf = file_of(wk_sq), wkr = rank_of(wk_sq);
-        int attack_count = 0;
-        int attack_weight = 0;
-        for (auto &o : king_zone_offsets) {
-            int nf = wkf + o[0], nr = wkr + o[1];
-            if (nf < 0 || nf > 7 || nr < 0 || nr > 7) continue;
-            int sq = make_sq(nf, nr);
-            if (board.is_square_attacked(sq, BLACK)) {
-                attack_count++;
-                // Weight by proximity
-                int dist = std::max(abs(o[0]), abs(o[1]));
-                attack_weight += (dist <= 1) ? 3 : 1;
-            }
-        }
-        // Quadratic scaling for king danger
-        static const int safety_table[] = {0, 0, 1, 2, 3, 5, 7, 10, 13, 16, 20, 25, 30, 36, 42, 50, 58};
-        int idx = clamp(attack_count, 0, 16);
-        int danger = safety_table[idx] * 10;
-        if (black_has_queen) danger = danger * 3 / 2;
-        safety -= danger;
-
         // Pawn shield
-        int shield_bonus = 0;
+        int shield = 0;
         for (int df = -1; df <= 1; ++df) {
             int sf = wkf + df;
             if (sf < 0 || sf > 7) continue;
-            // Check rank 1 and 2 for pawns
             if (wkr <= 1) {
-                if (board.pos.board[make_sq(sf, 1)] == WP) shield_bonus += 15;
-                else if (board.pos.board[make_sq(sf, 2)] == WP) shield_bonus += 5;
-                else shield_bonus -= 20;  // open file near king
+                if (pos.board[make_sq(sf, 1)] == WP) shield += 15;
+                else if (sf >= 0 && sf <= 7 && pos.board[make_sq(sf, 2)] == WP) shield += 5;
+                else shield -= 25;
             }
-        }
-        safety += shield_bonus;
-
-        // Open files near king penalty
-        for (int df = -1; df <= 1; ++df) {
-            int sf = wkf + df;
-            if (sf < 0 || sf > 7) continue;
+            // Open file penalty
             bool has_own_pawn = false;
             bool has_enemy_heavy = false;
             for (int r = 0; r < 8; ++r) {
-                int p = board.pos.board[make_sq(sf, r)];
+                int p = pos.board[make_sq(sf, r)];
                 if (p == WP) has_own_pawn = true;
                 if (p == BR || p == BQ) has_enemy_heavy = true;
             }
-            if (!has_own_pawn && has_enemy_heavy) safety -= 50;
+            if (!has_own_pawn && has_enemy_heavy) shield -= 50;
         }
+        // Penalty for enemy pieces near king (lightweight — just check adjacent squares)
+        int attackers_near = 0;
+        static const int adj[8][2] = {{-1,-1},{-1,0},{-1,1},{0,-1},{0,1},{1,-1},{1,0},{1,1}};
+        for (auto &d : adj) {
+            int nf = wkf + d[0], nr = wkr + d[1];
+            if (nf < 0 || nf > 7 || nr < 0 || nr > 7) continue;
+            int p = pos.board[make_sq(nf, nr)];
+            if (p == BN || p == BB) attackers_near += 2;
+            if (p == BR) attackers_near += 3;
+            if (p == BQ) attackers_near += 5;
+        }
+        if (black_has_queen) attackers_near = attackers_near * 3 / 2;
+        safety += shield - attackers_near * 12;
     }
 
-    // Black king safety (attacks by white)
     if (bk_sq != -1) {
         int bkf = file_of(bk_sq), bkr = rank_of(bk_sq);
-        int attack_count = 0;
-        for (auto &o : king_zone_offsets) {
-            int nf = bkf + o[0], nr = bkr + o[1];
-            if (nf < 0 || nf > 7 || nr < 0 || nr > 7) continue;
-            int sq = make_sq(nf, nr);
-            if (board.is_square_attacked(sq, WHITE)) {
-                attack_count++;
-            }
-        }
-        static const int safety_table[] = {0, 0, 1, 2, 3, 5, 7, 10, 13, 16, 20, 25, 30, 36, 42, 50, 58};
-        int idx = clamp(attack_count, 0, 16);
-        int danger = safety_table[idx] * 10;
-        if (white_has_queen) danger = danger * 3 / 2;
-        safety += danger;
-
-        // Pawn shield
-        int shield_bonus = 0;
+        int shield = 0;
         for (int df = -1; df <= 1; ++df) {
             int sf = bkf + df;
             if (sf < 0 || sf > 7) continue;
             if (bkr >= 6) {
-                if (board.pos.board[make_sq(sf, 6)] == BP) shield_bonus += 15;
-                else if (board.pos.board[make_sq(sf, 5)] == BP) shield_bonus += 5;
-                else shield_bonus -= 20;
+                if (pos.board[make_sq(sf, 6)] == BP) shield += 15;
+                else if (sf >= 0 && sf <= 7 && pos.board[make_sq(sf, 5)] == BP) shield += 5;
+                else shield -= 25;
             }
-        }
-        safety -= shield_bonus;
-
-        // Open files near king penalty  
-        for (int df = -1; df <= 1; ++df) {
-            int sf = bkf + df;
-            if (sf < 0 || sf > 7) continue;
             bool has_own_pawn = false;
             bool has_enemy_heavy = false;
             for (int r = 0; r < 8; ++r) {
-                int p = board.pos.board[make_sq(sf, r)];
+                int p = pos.board[make_sq(sf, r)];
                 if (p == BP) has_own_pawn = true;
                 if (p == WR || p == WQ) has_enemy_heavy = true;
             }
-            if (!has_own_pawn && has_enemy_heavy) safety += 50;
+            if (!has_own_pawn && has_enemy_heavy) shield -= 50;
         }
+        int attackers_near = 0;
+        static const int adj[8][2] = {{-1,-1},{-1,0},{-1,1},{0,-1},{0,1},{1,-1},{1,0},{1,1}};
+        for (auto &d : adj) {
+            int nf = bkf + d[0], nr = bkr + d[1];
+            if (nf < 0 || nf > 7 || nr < 0 || nr > 7) continue;
+            int p = pos.board[make_sq(nf, nr)];
+            if (p == WN || p == WB) attackers_near += 2;
+            if (p == WR) attackers_near += 3;
+            if (p == WQ) attackers_near += 5;
+        }
+        if (white_has_queen) attackers_near = attackers_near * 3 / 2;
+        safety -= shield - attackers_near * 12;
     }
 
-    // === KING POSITION PENALTIES — uncastled king in middlegame ===
-    if (board.pos.fullmove_number > 6) {
+    // King position penalties — uncastled king in middlegame
+    if (pos.fullmove_number > 6) {
         if (wk_sq != -1) {
-            int wk_rank = rank_of(wk_sq);
-            int wk_file = file_of(wk_sq);
-            if (wk_rank >= 2 && wk_rank <= 5 && wk_file >= 2 && wk_file <= 5) {
-                safety -= 120;
-            }
-            if (wk_sq == make_sq(4, 0) && board.pos.fullmove_number > 10) safety -= 30;
+            int wk_rank = rank_of(wk_sq), wk_file = file_of(wk_sq);
+            if (wk_rank >= 2 && wk_rank <= 5 && wk_file >= 2 && wk_file <= 5) safety -= 120;
+            if (wk_sq == make_sq(4, 0) && pos.fullmove_number > 10) safety -= 30;
         }
         if (bk_sq != -1) {
-            int bk_rank = rank_of(bk_sq);
-            int bk_file = file_of(bk_sq);
-            if (bk_rank >= 2 && bk_rank <= 5 && bk_file >= 2 && bk_file <= 5) {
-                safety += 120;
-            }
-            if (bk_sq == make_sq(4, 7) && board.pos.fullmove_number > 10) safety += 30;
+            int bk_rank = rank_of(bk_sq), bk_file = file_of(bk_sq);
+            if (bk_rank >= 2 && bk_rank <= 5 && bk_file >= 2 && bk_file <= 5) safety += 120;
+            if (bk_sq == make_sq(4, 7) && pos.fullmove_number > 10) safety += 30;
         }
     }
 
@@ -520,28 +377,7 @@ static int evaluate_mobility(const Board &board) {
     return score;
 }
 
-// ========================
-// Development Quality
-// ========================
-
-static int evaluate_development_quality(Board &board) {
-    int dev = 0;
-
-    if (board.pos.fullmove_number <= 12) {
-        int center_control = 0;
-        int center_sqs[] = {make_sq(3,3), make_sq(3,4), make_sq(4,3), make_sq(4,4)};
-        for (int csq : center_sqs) {
-            if (board.is_square_attacked(csq, WHITE)) center_control += 8;
-            if (board.is_square_attacked(csq, BLACK)) center_control -= 8;
-            int p = board.pos.board[csq];
-            if (p == WP || p == WN) center_control += 15;
-            if (p == BP || p == BN) center_control -= 15;
-        }
-        dev += center_control;
-    }
-
-    return dev;
-}
+// (Development quality via is_square_attacked removed for speed — center control done via PSTs)
 
 // ========================
 // Pawn Structure
@@ -843,16 +679,10 @@ int evaluate(Board &board) {
     int ks = evaluate_king_safety(board, wk_sq, bk_sq, white_has_queen, black_has_queen, phase256);
     mg_score += ks;
 
-    // === DEVELOPMENT QUALITY ===
-    mg_score += evaluate_development_quality(board);
-
     // === MOBILITY ===
     int mob = evaluate_mobility(board);
     mg_score += mob;
     eg_score += mob;
-
-    // === TACTICAL THREATS ===
-    mg_score += evaluate_threats(board);
 
     // === ROOK ON OPEN/SEMI-OPEN FILE ===
     for (int sq = 0; sq < 64; ++sq) {

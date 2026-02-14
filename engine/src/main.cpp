@@ -48,8 +48,15 @@ int main() {
                 time_ms = engine.compute_time_ms(wtime, btime, winc, binc);
             }
 
-            Move best = engine.search_bestmove(max_depth, time_ms);
-            cout << "bestmove " << move_to_uci(best) << endl;
+            // Probe opening book first
+            string book_move = engine.probe_book();
+            if (!book_move.empty()) {
+                cout << "info string book move" << endl;
+                cout << "bestmove " << book_move << endl;
+            } else {
+                Move best = engine.search_bestmove(max_depth, time_ms);
+                cout << "bestmove " << move_to_uci(best) << endl;
+            }
         } else if (line == "legal") {
             auto moves = engine.legal_moves_uci();
             cout << "legal";

@@ -12,7 +12,6 @@ namespace chess {
 Engine::Engine() {
     init_pst_tables();
     board.parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-    searcher.opening_variety = true;
 }
 
 void Engine::set_startpos() {
@@ -20,7 +19,6 @@ void Engine::set_startpos() {
     board.hash_history.clear();
     board.last_move_white = Move();
     board.last_move_black = Move();
-    searcher.opening_variety = true;
 }
 
 void Engine::new_game() {
@@ -80,9 +78,7 @@ void Engine::apply_uci_move(const string &uci) {
         if (m.from == from && m.to == to) {
             if (promo != EMPTY && m.promotion != promo) continue;
             board.make_move(m);
-            if (board.pos.fullmove_number > 8) {
-                searcher.opening_variety = false;
-            }
+
             return;
         }
     }
@@ -108,6 +104,10 @@ int Engine::compute_time_ms(int wtime, int btime, int winc, int binc) const {
     if (base < 100) base = 100;
     if (base > our_time / 3) base = our_time / 3;
     return base;
+}
+
+string Engine::probe_book() const {
+    return book.probe(board.pos.hash);
 }
 
 string Engine::move_to_uci_public(const Move &m) const {

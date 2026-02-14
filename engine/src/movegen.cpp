@@ -134,16 +134,19 @@ void generate_pseudo_moves(const Board &board, vector<Move> &moves) {
                 }
             }
         } else if (p == WB || p == BB || p == WR || p == BR || p == WQ || p == BQ) {
-            vector<pair<int,int>> dirs;
-            if (p == WB || p == BB || p == WQ || p == BQ) {
-                dirs.push_back({1,1}); dirs.push_back({1,-1}); dirs.push_back({-1,1}); dirs.push_back({-1,-1});
-            }
-            if (p == WR || p == BR || p == WQ || p == BQ) {
-                dirs.push_back({1,0}); dirs.push_back({-1,0}); dirs.push_back({0,1}); dirs.push_back({0,-1});
-            }
-            for (auto &d : dirs) {
-                int nf = f + d.first;
-                int nr = r + d.second;
+            static const int bishop_dirs[4][2] = {{1,1},{1,-1},{-1,1},{-1,-1}};
+            static const int rook_dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+            static const int queen_dirs[8][2] = {{1,1},{1,-1},{-1,1},{-1,-1},{1,0},{-1,0},{0,1},{0,-1}};
+
+            const int (*dirs)[2];
+            int num_dirs;
+            if (p == WB || p == BB) { dirs = bishop_dirs; num_dirs = 4; }
+            else if (p == WR || p == BR) { dirs = rook_dirs; num_dirs = 4; }
+            else { dirs = queen_dirs; num_dirs = 8; }
+
+            for (int di = 0; di < num_dirs; ++di) {
+                int nf = f + dirs[di][0];
+                int nr = r + dirs[di][1];
                 while (nf >= 0 && nf <= 7 && nr >= 0 && nr <= 7) {
                     int to = make_sq(nf, nr);
                     int target = pos.board[to];
@@ -155,8 +158,8 @@ void generate_pseudo_moves(const Board &board, vector<Move> &moves) {
                         }
                         break;
                     }
-                    nf += d.first;
-                    nr += d.second;
+                    nf += dirs[di][0];
+                    nr += dirs[di][1];
                 }
             }
         } else if (p == WK || p == BK) {

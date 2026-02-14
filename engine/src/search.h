@@ -2,7 +2,6 @@
 
 #include "types.h"
 #include <chrono>
-#include <random>
 #include <vector>
 #include <utility>
 
@@ -20,7 +19,7 @@ public:
     void new_game();
 
     std::vector<TTEntry> tt;
-    bool opening_variety = true;
+
 
 private:
     // Move ordering
@@ -61,13 +60,16 @@ private:
     int node_count = 0;
     int mate_probe_nodes = 0;
     int mate_search_nodes = 0;
-    std::mt19937 opening_rng;
+
 
     // Killer moves
     Move killers[MAX_PLY][2];
 
     // History heuristic [side][from][to]
     int history[2][64][64];
+
+    // Countermove heuristic [from][to] -> best response
+    Move countermoves[64][64];
 
     static constexpr int MATE_TRAP_PLIES = 6;
     static constexpr int MATE_PROBE_LIMIT = 8000;

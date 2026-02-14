@@ -21,14 +21,13 @@ Searcher::Searcher() {
     tt.resize(TT_SIZE);
     memset(history, 0, sizeof(history));
     memset(killers, 0, sizeof(killers));
-    opening_rng.seed(chrono::steady_clock::now().time_since_epoch().count());
 }
 
 void Searcher::new_game() {
     fill(tt.begin(), tt.end(), TTEntry{});
     memset(history, 0, sizeof(history));
     memset(killers, 0, sizeof(killers));
-    opening_rng.seed(chrono::steady_clock::now().time_since_epoch().count());
+    memset(countermoves, 0, sizeof(countermoves));
 }
 
 // ========================
@@ -133,241 +132,93 @@ int Searcher::simple_move_score(const Board &board, const Move &m,
         if (killers[ply][1].from == m.from && killers[ply][1].to == m.to) return 3900000;
     }
 
+    // Countermove heuristic: the expected response to opponent's last move
+    const Move &prev = (board.pos.side_to_move == WHITE) ? board.last_move_black : board.last_move_white;
+    if (prev.from >= 0 && prev.from < 64 && prev.to >= 0 && prev.to < 64) {
+        const Move &cm = countermoves[prev.from][prev.to];
+        if (cm.from == m.from && cm.to == m.to) return 3800000;
+    }
+
     // History heuristic
     int side = (int)board.pos.side_to_move;
     return history[side][m.from][m.to];
 }
 
 // ========================
-// Complex Move Score (root only — thorough)
+// Complex Move Score (root only — move ordering)
 // ========================
 
 int Searcher::move_score(const Board &board, const Move &m) const {
     int score = 0;
     const auto &pos = board.pos;
+    Side mover = (m.moved <= WK) ? WHITE : BLACK;
+    Side opp = (mover == WHITE) ? BLACK : WHITE;
+    int pt = piece_type((Piece)m.moved);
 
-    // === Capture enemy QUEEN ===
-    {
-        int cap_pt = piece_type((Piece)m.captured);
-        if (cap_pt == WQ) {
-            Side mover = (m.moved <= WK) ? WHITE : BLACK;
-            Side opp = (mover == WHITE) ? BLACK : WHITE;
-            int our_value = piece_value(m.moved);
-            if (!board.is_square_attacked(m.to, opp)) {
-                score += 5000;
-            } else {
-                if (our_value < 900) score += 3000;
-            }
-        }
+    // === Promotions ===
+    if (m.promotion != EMPTY) {
+        score += 8000 + piece_value(m.promotion);
     }
 
-    // === Check if our queen is under attack ===
-    {
-        Side mover = (m.moved <= WK) ? WHITE : BLACK;
-        Side opp = (mover == WHITE) ? BLACK : WHITE;
-        int our_queen = (mover == WHITE) ? WQ : BQ;
-        int our_queen_sq = -1;
-        for (int sq = 0; sq < 64; ++sq) {
-            if (pos.board[sq] == our_queen) { our_queen_sq = sq; break; }
-        }
-        if (our_queen_sq != -1 && board.is_square_attacked(our_queen_sq, opp)) {
-            int pt = piece_type((Piece)m.moved);
-            if (pt == WQ) {
-                if (!board.is_square_attacked(m.to, opp)) {
-                    int escape_bonus = 2000;
-                    int to_rank = rank_of(m.to);
-                    bool back_rank = (mover == WHITE && to_rank == 0) || (mover == BLACK && to_rank == 7);
-                    if (back_rank) escape_bonus = 800;
-                    score += escape_bonus;
-                } else {
-                    score += 500;
-                }
-                if (m.captured != EMPTY) score += 800;
-            } else {
-                if (m.captured == EMPTY) score -= 1500;
-            }
-        }
-        // Queen moving to attacked square
-        int pt_q = piece_type((Piece)m.moved);
-        if (pt_q == WQ && m.captured == EMPTY && board.is_square_attacked(m.to, opp)) {
-            score -= 2000;
-        }
-    }
-
-    // === Piece moving to attacked undefended square ===
-    {
-        int pt = piece_type((Piece)m.moved);
-        Side mover = (m.moved <= WK) ? WHITE : BLACK;
-        Side opp = (mover == WHITE) ? BLACK : WHITE;
-        if (m.captured == EMPTY && board.is_square_attacked(m.to, opp)) {
-            if (!board.is_square_attacked(m.to, mover)) {
-                if (pt == WQ) score -= 2500;
-                else if (pt == WR) score -= 1000;
-                else if (pt == WB || pt == WN) score -= 600;
-            }
-        }
-    }
-
-    // === Captures MVV-LVA ===
+    // === Captures — MVV-LVA ===
     if (m.captured != EMPTY) {
-        Side mover = (m.moved <= WK) ? WHITE : BLACK;
-        Side opp = (mover == WHITE) ? BLACK : WHITE;
-        int our_value = piece_value(m.moved);
         int their_value = piece_value(m.captured);
+        int our_value = piece_value(m.moved);
         bool is_defended = board.is_square_attacked(m.to, opp);
-        int eff = (piece_type((Piece)m.moved) == WK) ? 0 : our_value;
         if (!is_defended) {
-            score += 10 * their_value - eff;
+            score += 5000 + their_value * 10 - our_value;
+        } else if (our_value <= their_value + 50) {
+            score += 4000 + their_value - our_value;
         } else {
-            if (piece_type((Piece)m.moved) == WK) score += their_value;
-            else if (our_value <= their_value + 50) score += their_value - our_value + 100;
-            else score -= (our_value - their_value) * 2;
+            score += 2000 + their_value - our_value;
         }
     }
-    if (m.promotion != EMPTY) score += piece_value(m.promotion) + 800;
 
-    // === Castle ===
-    if (m.is_castle) {
-        score += 350;
-        Side mover = (m.moved <= WK) ? WHITE : BLACK;
-        Side opp = (mover == WHITE) ? BLACK : WHITE;
-        bool queenside = (file_of(m.to) == 2);
-        int files_to_check[3];
-        if (queenside) { files_to_check[0]=0; files_to_check[1]=1; files_to_check[2]=2; }
-        else           { files_to_check[0]=5; files_to_check[1]=6; files_to_check[2]=7; }
-        for (int fc : files_to_check) {
-            bool has_own_pawn = false, has_enemy_heavy = false;
-            for (int r = 0; r < 8; ++r) {
-                int p = pos.board[make_sq(fc, r)];
-                if ((mover==WHITE && p==WP) || (mover==BLACK && p==BP)) has_own_pawn = true;
-                bool enemy = (mover==WHITE) ? is_black((Piece)p) : is_white((Piece)p);
-                if (enemy && p != EMPTY) {
-                    int pt = piece_type((Piece)p);
-                    if (pt == WR || pt == WQ) has_enemy_heavy = true;
-                }
-            }
-            if (!has_own_pawn) {
-                score -= 120;
-                if (has_enemy_heavy) score -= 150;
-            }
-        }
-        if (queenside) {
-            int opp_bishop = (mover == WHITE) ? BB : WB;
-            int opp_queen_p = (mover == WHITE) ? BQ : WQ;
-            for (int i = 0; i < 8; ++i) {
-                int sq = make_sq(i, i);
-                int p = pos.board[sq];
-                if (p == opp_bishop || p == opp_queen_p) { score -= 150; break; }
-                if (p != EMPTY && sq != m.from) break;
-            }
+    // === Castling ===
+    if (m.is_castle) score += 500;
+
+    // === Avoid moving to attacked undefended squares ===
+    if (m.captured == EMPTY && board.is_square_attacked(m.to, opp)) {
+        if (!board.is_square_attacked(m.to, mover)) {
+            if (pt == WQ) score -= 2500;
+            else if (pt == WR) score -= 800;
+            else if (pt == WB || pt == WN) score -= 400;
         }
     }
 
     // === Penalize king moves if castling available ===
-    {
-        int pt = piece_type((Piece)m.moved);
-        Side mover = (m.moved <= WK) ? WHITE : BLACK;
-        if (pt == WK && !m.is_castle) {
-            bool can_k = (mover == WHITE) ? (pos.castling_rights & 1) : (pos.castling_rights & 4);
-            bool can_q = (mover == WHITE) ? (pos.castling_rights & 2) : (pos.castling_rights & 8);
-            if (can_k || can_q) score -= 300;
-        }
+    if (pt == WK && !m.is_castle) {
+        bool can_k = (mover == WHITE) ? (pos.castling_rights & 1) : (pos.castling_rights & 4);
+        bool can_q = (mover == WHITE) ? (pos.castling_rights & 2) : (pos.castling_rights & 8);
+        if (can_k || can_q) score -= 300;
     }
 
+    // === Penalize reverse/repeated moves ===
     if (is_reverse_of_last(board, m)) score -= reverse_move_penalty(m);
-    if (is_repeat_piece_move(board, m)) {
-        int pt = piece_type((Piece)m.moved);
-        int penalty = 150;
-        if (pt == WB) penalty = 200;
-        if (pt == WN) penalty = 180;
-        if (pt == WR) penalty = 220;
-        score -= penalty;
-    }
+    if (is_repeat_piece_move(board, m)) score -= 200;
 
-    // === Development bonuses ===
-    {
-        int pt = piece_type((Piece)m.moved);
-        Side mover = (m.moved <= WK) ? WHITE : BLACK;
+    // === Development bonuses in opening ===
+    if (pos.fullmove_number <= 12 && m.captured == EMPTY) {
         int to_rank = rank_of(m.to);
         int to_file = file_of(m.to);
-
-        if (pos.fullmove_number <= 12 && m.captured == EMPTY) {
-            if (pt == WN) {
-                if (mover == WHITE && to_rank == 2 && (to_file == 2 || to_file == 5)) score += 80;
-                if (mover == BLACK && to_rank == 5 && (to_file == 2 || to_file == 5)) score += 80;
-                if (to_file >= 2 && to_file <= 5 && to_rank >= 2 && to_rank <= 5) score += 40;
-            }
-            if (pt == WB) {
-                if (to_file >= 1 && to_file <= 6 && to_rank >= 1 && to_rank <= 6) score += 50;
-                if ((to_file >= 2 && to_file <= 5) && (to_rank >= 2 && to_rank <= 5)) score += 40;
-            }
-            if (pt == WP && (to_file == 3 || to_file == 4)) {
-                if ((mover == WHITE && (to_rank == 2 || to_rank == 3)) ||
-                    (mover == BLACK && (to_rank == 4 || to_rank == 5))) score += 60;
-            }
+        if (pt == WN) {
+            if (to_file >= 2 && to_file <= 5 && to_rank >= 2 && to_rank <= 5) score += 60;
         }
-    }
-
-    // === Penalize pointless rook moves in opening ===
-    {
-        int pt = piece_type((Piece)m.moved);
-        if (pt == WR && m.captured == EMPTY && pos.fullmove_number <= 15) {
-            int to_file = file_of(m.to);
-            int to_rank = rank_of(m.to);
-            if (to_rank == 0 || to_rank == 7) {
-                if (to_file == 1 || to_file == 2 || to_file == 5 || to_file == 6) score -= 200;
-                if (pos.fullmove_number <= 10) score -= 150;
-            }
+        if (pt == WB) {
+            if (to_file >= 1 && to_file <= 6 && to_rank >= 1 && to_rank <= 6) score += 50;
         }
-    }
-
-    // === Penalize flank pawn moves in opening ===
-    {
-        int pt = piece_type((Piece)m.moved);
-        if (pt == WP && m.captured == EMPTY && pos.fullmove_number <= 10) {
+        if (pt == WP && (to_file == 3 || to_file == 4)) {
+            if ((mover == WHITE && (to_rank == 2 || to_rank == 3)) ||
+                (mover == BLACK && (to_rank == 4 || to_rank == 5))) score += 60;
+        }
+        // Penalize rook moves in opening
+        if (pt == WR && pos.fullmove_number <= 10) score -= 300;
+        // Penalize queen moves in early opening
+        if (pt == WQ && pos.fullmove_number <= 6) score -= 200;
+        // Penalize flank pawn moves
+        if (pt == WP) {
             int from_file = file_of(m.from);
-            if (from_file == 0 || from_file == 7) score -= 180;
-            if (from_file == 1) {
-                Side mover = (m.moved <= WK) ? WHITE : BLACK;
-                int to_rank = rank_of(m.to);
-                if (mover == WHITE && to_rank == 3) score -= 120;
-                else if (mover == BLACK && to_rank == 4) score -= 120;
-            }
-            if (from_file == 6 && pos.fullmove_number <= 8) score -= 100;
-        }
-    }
-
-    // === Never trade queen for minor piece ===
-    {
-        int pt = piece_type((Piece)m.moved);
-        if (pt == WQ && m.captured != EMPTY) {
-            int cap_pt = piece_type((Piece)m.captured);
-            if (cap_pt == WB || cap_pt == WN || cap_pt == WP) {
-                Side mover = (m.moved <= WK) ? WHITE : BLACK;
-                Side opp = (mover == WHITE) ? BLACK : WHITE;
-                if (board.is_square_attacked(m.to, opp)) {
-                    score -= 10 * piece_value(m.captured);
-                    score -= (900 - piece_value(m.captured)) * 3;
-                }
-            }
-            if (cap_pt == WR) {
-                Side mover = (m.moved <= WK) ? WHITE : BLACK;
-                Side opp = (mover == WHITE) ? BLACK : WHITE;
-                if (board.is_square_attacked(m.to, opp)) score -= 800;
-            }
-        }
-        // king to center
-        if (pt == WK) {
-            int to_rank = rank_of(m.to);
-            int to_file = file_of(m.to);
-            if (to_rank >= 2 && to_rank <= 5) {
-                score -= 500;
-                if (to_file >= 2 && to_file <= 5) score -= 300;
-            }
-            if (!m.is_castle && pos.fullmove_number <= 15) {
-                int from_rank = rank_of(m.from);
-                if ((from_rank == 0 && to_rank > 0) || (from_rank == 7 && to_rank < 7)) score -= 400;
-            }
+            if (from_file == 0 || from_file == 7) score -= 150;
         }
     }
 
@@ -612,8 +463,35 @@ int Searcher::alpha_beta(Board &board, int depth, int alpha, int beta, Move &bes
 
     bool in_check_now = board.in_check(board.pos.side_to_move);
 
+    // === IID: Internal Iterative Deepening ===
+    // When no TT move and depth is high, do a shallow search to get a move for ordering
+    if (tt_move.from == -1 && depth >= 5 && !in_check_now) {
+        Move iid_best;
+        alpha_beta(board, depth - 4, alpha, beta, iid_best, ply);
+        if (stop_search) return 0;
+        // Re-probe TT — the shallow search should have stored something
+        if (tt[tt_idx].hash == hash) {
+            tt_move = tt[tt_idx].best;
+        }
+    }
+
+    // === Static eval (compute once, reuse for all pruning) ===
+    int static_eval = 0;
+    bool eval_computed = false;
+    if (!in_check_now && ply > 0) {
+        static_eval = evaluate(board);
+        eval_computed = true;
+    }
+
+    // === Reverse Futility Pruning (Static Null Move Pruning) ===
+    if (!in_check_now && ply > 0 && depth <= 6 && eval_computed) {
+        int rfp_margin = depth * 80;
+        if (static_eval - rfp_margin >= beta) return static_eval;
+    }
+
     // === Null Move Pruning ===
-    if (!in_check_now && depth >= 3 && ply > 0) {
+    if (!in_check_now && depth >= 3 && ply > 0 && eval_computed && static_eval >= beta) {
+        // Quick check for non-pawn material (avoid zugzwang)
         Side mover = board.pos.side_to_move;
         bool has_pieces = false;
         for (int sq = 0; sq < 64; ++sq) {
@@ -625,7 +503,7 @@ int Searcher::alpha_beta(Board &board, int depth, int alpha, int beta, Move &bes
             if (pt != WP && pt != WK) { has_pieces = true; break; }
         }
         if (has_pieces) {
-            int R = 2 + depth / 4;  // More aggressive reduction: R = 2 + depth/4
+            int R = 3 + depth / 4;  // More aggressive: R=3+depth/4
             if (R > depth - 1) R = depth - 1;
             int old_ep = board.make_null_move();
             Move dummy;
@@ -636,22 +514,17 @@ int Searcher::alpha_beta(Board &board, int depth, int alpha, int beta, Move &bes
         }
     }
 
-    // === Static eval for pruning decisions ===
-    int static_eval = 0;
+    // === Futility / Razoring ===
     bool do_futility = false;
-    if (!in_check_now && ply > 0 && depth <= 3) {
-        static_eval = evaluate(board);
-        // Futility pruning margins: depth 1 = 200, depth 2 = 350, depth 3 = 500
+    if (!in_check_now && ply > 0 && depth <= 3 && eval_computed) {
         static const int futility_margin[] = {0, 200, 350, 500};
         if (static_eval + futility_margin[depth] <= alpha) {
             do_futility = true;
         }
     }
 
-    // === Razoring: at depth 1-2, if static eval very low, drop into qsearch ===
-    if (!in_check_now && ply > 0 && depth <= 2 && !do_futility) {
+    if (!in_check_now && ply > 0 && depth <= 2 && !do_futility && eval_computed) {
         int razor_margin = (depth == 1) ? 300 : 600;
-        if (static_eval == 0) static_eval = evaluate(board);
         if (static_eval + razor_margin <= alpha) {
             int q_score = quiescence(board, alpha, beta);
             if (q_score <= alpha) return q_score;
@@ -680,6 +553,15 @@ int Searcher::alpha_beta(Board &board, int depth, int alpha, int beta, Move &bes
         if (do_futility && is_quiet && moves_searched > 0 && !in_check_now) {
             moves_searched++;
             continue;
+        }
+
+        // Late Move Pruning (LMP): at low depth, skip very late quiet moves
+        if (is_quiet && !in_check_now && depth <= 4 && moves_searched > 0) {
+            static const int lmp_count[] = {0, 5, 8, 13, 20};
+            if (moves_searched >= lmp_count[depth]) {
+                moves_searched++;
+                continue;
+            }
         }
 
         Undo u = board.make_move(m);
@@ -732,7 +614,7 @@ int Searcher::alpha_beta(Board &board, int depth, int alpha, int beta, Move &bes
         }
         if (score > alpha) alpha = score;
         if (alpha >= beta) {
-            // Beta cutoff: update killers and history
+            // Beta cutoff: update killers, history, and countermove
             if (m.captured == EMPTY && ply < MAX_PLY) {
                 if (!(killers[ply][0].from == m.from && killers[ply][0].to == m.to)) {
                     killers[ply][1] = killers[ply][0];
@@ -747,6 +629,11 @@ int Searcher::alpha_beta(Board &board, int depth, int alpha, int beta, Move &bes
                         for (int f = 0; f < 64; ++f)
                             for (int t = 0; t < 64; ++t)
                                 history[s][f][t] /= 2;
+                }
+                // Countermove: store this move as the best response to opponent's last move
+                const Move &prev = (board.pos.side_to_move == WHITE) ? board.last_move_black : board.last_move_white;
+                if (prev.from >= 0 && prev.from < 64 && prev.to >= 0 && prev.to < 64) {
+                    countermoves[prev.from][prev.to] = m;
                 }
             }
             break;
@@ -813,66 +700,29 @@ int Searcher::alpha_beta_root(Board &board, int depth, int alpha, int beta, Move
 
     int best_score = -INF;
     root_scores.clear();
-    bool collect_all = opening_variety && board.pos.fullmove_number <= 8;
 
     for (size_t i = 0; i < moves.size(); ++i) {
         auto &m = moves[i];
         Undo u = board.make_move(m);
 
-        // Safety: check if opponent has mate in 1 (root only)
-        if (has_mate_in_one(board)) {
-            board.unmake_move(m, u);
-            continue;
-        }
-
         bool gives_check = board.in_check(board.pos.side_to_move);
         int extension = 0;
-        if (gives_check) {
-            bool checker_attacked = board.is_square_attacked(m.to, board.pos.side_to_move);
-            bool checker_defended = board.is_square_attacked(m.to, opposite(board.pos.side_to_move));
-            if (!checker_attacked || checker_defended) extension = 1;
-        }
-
-        // Blunder filter via SEE
-        if (!gives_check) {
-            int pt_moved = piece_type((Piece)m.moved);
-            int see = see_score(board, m);
-            if ((pt_moved == WQ || pt_moved == WR || pt_moved == WB || pt_moved == WN) && see < -200) {
-                board.unmake_move(m, u);
-                continue;
-            }
-        }
+        if (gives_check) extension = 1;
 
         Move child_best;
-        int search_alpha = collect_all ? max(-INF, best_score - 50) : alpha;
-        int score = -alpha_beta(board, depth - 1 + extension, -beta, -search_alpha, child_best, 1);
+        int score;
 
-        board.unmake_move(m, u);
-
-        // Post-search penalty: queen deep pawn grab
-        {
-            int pt = piece_type((Piece)m.moved);
-            if (pt == WQ && m.captured != EMPTY && piece_type((Piece)m.captured) == WP) {
-                int to_rank = rank_of(m.to);
-                bool queen_w = is_white((Piece)m.moved);
-                bool deep = queen_w ? (to_rank >= 6) : (to_rank <= 1);
-                if (deep) {
-                    int undev = 0;
-                    if (queen_w) {
-                        if (board.pos.board[make_sq(1,0)] == WN) undev++;
-                        if (board.pos.board[make_sq(6,0)] == WN) undev++;
-                        if (board.pos.board[make_sq(2,0)] == WB) undev++;
-                        if (board.pos.board[make_sq(5,0)] == WB) undev++;
-                    } else {
-                        if (board.pos.board[make_sq(1,7)] == BN) undev++;
-                        if (board.pos.board[make_sq(6,7)] == BN) undev++;
-                        if (board.pos.board[make_sq(2,7)] == BB) undev++;
-                        if (board.pos.board[make_sq(5,7)] == BB) undev++;
-                    }
-                    score -= 150 + undev * 100;
-                }
+        // PVS at root: first move full window, rest zero-window + re-search
+        if (i == 0) {
+            score = -alpha_beta(board, depth - 1 + extension, -beta, -alpha, child_best, 1);
+        } else {
+            score = -alpha_beta(board, depth - 1 + extension, -alpha - 1, -alpha, child_best, 1);
+            if (score > alpha && score < beta && !stop_search) {
+                score = -alpha_beta(board, depth - 1 + extension, -beta, -alpha, child_best, 1);
             }
         }
+
+        board.unmake_move(m, u);
 
         root_scores.push_back({m, score});
         if (stop_search) return 0;
@@ -881,7 +731,7 @@ int Searcher::alpha_beta_root(Board &board, int depth, int alpha, int beta, Move
             best = m;
         }
         if (score > alpha) alpha = score;
-        if (!collect_all && alpha >= beta) break;
+        if (alpha >= beta) break;
     }
 
     return best_score;
@@ -906,61 +756,11 @@ Move Searcher::search_bestmove(Board &board, int max_depth, int time_limit_ms) {
             for (int t = 0; t < 64; ++t)
                 history[s][f][t] /= 4;
 
-    // Count heavy pieces
-    int heavy_pieces = 0;
-    for (int sq = 0; sq < 64; ++sq) {
-        int p = board.pos.board[sq];
-        if (p == WQ || p == BQ || p == WR || p == BR) heavy_pieces++;
-    }
-
-    // === QUICK CHECK: Forced mate in 3 ===
-    int our_mate = 0;
-    if (heavy_pieces > 0) {
-        our_mate = has_mate_in_n(board, 3);
-    }
-    if (our_mate >= MATE_SCORE - 20) {
-        auto moves = generate_legal_moves(board);
-        Move best_mate_move;
-        int best_mate_score = 0;
-        for (auto &m : moves) {
-            Undo u = board.make_move(m);
-            bool gives_check = board.in_check(board.pos.side_to_move);
-            if (gives_check) {
-                auto opp_moves = generate_legal_moves(board);
-                if (opp_moves.empty()) {
-                    board.unmake_move(m, u);
-                    return m;
-                }
-                mate_search_nodes = 0;
-                int score = mate_search(board, 5, false);
-                if (score > best_mate_score) {
-                    best_mate_score = score;
-                    best_mate_move = m;
-                }
-            }
-            board.unmake_move(m, u);
-        }
-        if (best_mate_score >= MATE_SCORE - 20) return best_mate_move;
-    }
-
-    // === QUICK CHECK: Obvious promotion ===
-    {
-        auto moves = generate_legal_moves(board);
-        for (auto &m : moves) {
-            if (m.promotion == WQ || m.promotion == BQ) {
-                Undo u = board.make_move(m);
-                bool queen_safe = !board.is_square_attacked(m.to, board.pos.side_to_move);
-                board.unmake_move(m, u);
-                if (queen_safe) return m;
-            }
-        }
-    }
-
     // === Iterative Deepening with Aspiration Windows ===
     node_count = 0;
     Move prev_best;
     vector<pair<Move, int>> root_scores;
-    vector<pair<Move, int>> last_complete_root_scores;
+
     int prev_score = 0;
 
     for (int depth = 1; depth <= max_depth; ++depth) {
@@ -1001,7 +801,6 @@ Move Searcher::search_bestmove(Board &board, int max_depth, int time_limit_ms) {
         best_score = score;
         prev_score = score;
         depth_reached = depth;
-        last_complete_root_scores = root_scores;
 
         auto now = chrono::steady_clock::now();
         int elapsed = (int)chrono::duration_cast<chrono::milliseconds>(now - search_start).count();
@@ -1016,95 +815,6 @@ Move Searcher::search_bestmove(Board &board, int max_depth, int time_limit_ms) {
 
         // Don't start a new iteration if we've used > 40% of time (save for deeper search)
         if (elapsed > time_limit_ms * 2 / 5) break;
-    }
-
-    // === OPENING VARIETY ===
-    if (opening_variety && board.pos.fullmove_number <= 8 && !last_complete_root_scores.empty()) {
-        sort(last_complete_root_scores.begin(), last_complete_root_scores.end(),
-             [](auto &a, auto &b) { return a.second > b.second; });
-        int top_score = last_complete_root_scores[0].second;
-        int threshold = 25;
-        vector<pair<Move, int>> good_moves;
-        for (auto &c : last_complete_root_scores) {
-            if (top_score - c.second <= threshold) {
-                int pt = piece_type((Piece)c.first.moved);
-                int to_file = file_of(c.first.to);
-                if (pt == WN && (to_file == 0 || to_file == 7)) continue;
-                if (pt == WP) {
-                    int from_file = file_of(c.first.from);
-                    if (from_file == 0 || from_file == 7) continue;
-                }
-                if (pt == WR) continue;
-                good_moves.push_back(c);
-            }
-        }
-        if (good_moves.size() > 1) {
-            uniform_int_distribution<int> dist(0, (int)good_moves.size() - 1);
-            int pick = dist(opening_rng);
-            best = good_moves[pick].first;
-            best_score = good_moves[pick].second;
-        }
-    }
-
-    // === SAFETY CHECK: mate in 1/2 ===
-    auto time_remaining = [&]() -> int {
-        auto now = chrono::steady_clock::now();
-        return time_limit - (int)chrono::duration_cast<chrono::milliseconds>(now - search_start).count();
-    };
-
-    if (best.from != -1 && !stop_search && time_remaining() > time_limit * 2 / 5) {
-        Undo u = board.make_move(best);
-        bool allows_mate1 = opponent_has_mate_in_one(board);
-        int opp_mate = 0;
-        if (!allows_mate1 && time_remaining() > time_limit / 3) {
-            opp_mate = opponent_has_mate_in_n(board, 2);
-        }
-        if (allows_mate1 || opp_mate >= MATE_SCORE - 20) {
-            board.unmake_move(best, u);
-            cerr << "info string WARNING: Best move allows mate, finding alternative" << endl;
-            auto moves = generate_legal_moves(board);
-            Move safe_best;
-            int safe_score = -INF;
-            for (auto &m : moves) {
-                if (time_remaining() <= 20) break;
-                Undo u2 = board.make_move(m);
-                bool m_allows_mate1 = opponent_has_mate_in_one(board);
-                int m_opp_mate = m_allows_mate1 ? MATE_SCORE : opponent_has_mate_in_n(board, 2);
-                int score;
-                if (m_allows_mate1 || m_opp_mate >= MATE_SCORE - 20) {
-                    score = -MATE_SCORE;
-                } else if (time_remaining() > 20) {
-                    Move child_best;
-                    score = -alpha_beta(board, 3, -INF, INF, child_best, 0);
-                } else {
-                    score = 0;
-                }
-                board.unmake_move(m, u2);
-                if (score > safe_score) { safe_score = score; safe_best = m; }
-            }
-            if (safe_best.from != -1) best = safe_best;
-        } else {
-            board.unmake_move(best, u);
-        }
-    }
-
-    if (best.from != -1 && !stop_search && time_remaining() > time_limit * 2 / 5) {
-        if (is_mate_trap(board, best, MATE_TRAP_PLIES)) {
-            auto moves = generate_legal_moves(board);
-            Move alt_best = best;
-            int alt_score = -INF;
-            int alt_depth = max(1, min(3, depth_reached - 1));
-            for (auto &m : moves) {
-                if (time_up() || time_remaining() <= 20) break;
-                if (is_mate_trap(board, m, MATE_TRAP_PLIES)) continue;
-                Undo u = board.make_move(m);
-                Move child_best;
-                int score = -alpha_beta(board, alt_depth, -INF, INF, child_best, 0);
-                board.unmake_move(m, u);
-                if (score > alt_score) { alt_score = score; alt_best = m; }
-            }
-            if (alt_score > -INF / 2) best = alt_best;
-        }
     }
 
     if (best.from == -1) {
