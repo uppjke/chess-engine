@@ -538,8 +538,8 @@ int Searcher::quiescence(Board &board, int alpha, int beta) {
     if (stand >= beta) return beta;
     if (stand > alpha) alpha = stand;
 
-    // Delta pruning
-    if (stand + 900 < alpha) return stand;
+    // Delta pruning — if even capturing a queen can't raise alpha
+    if (stand + 1025 < alpha) return stand;
 
     vector<Move> moves;
     generate_pseudo_moves(board, moves);
@@ -561,6 +561,9 @@ int Searcher::quiescence(Board &board, int alpha, int beta) {
             int see_val = piece_value(m.captured) - piece_value(m.moved);
             if (see_val < -200) continue;
         }
+
+        // Delta pruning per-move
+        if (m.promotion == EMPTY && stand + piece_value(m.captured) + 200 < alpha) continue;
 
         Undo u = board.make_move(m);
         if (board.in_check(opposite(board.pos.side_to_move))) {
@@ -611,7 +614,6 @@ int Searcher::alpha_beta(Board &board, int depth, int alpha, int beta, Move &bes
 
     // === Null Move Pruning ===
     if (!in_check_now && depth >= 3 && ply > 0) {
-        // Check that we have non-pawn material
         Side mover = board.pos.side_to_move;
         bool has_pieces = false;
         for (int sq = 0; sq < 64; ++sq) {
@@ -623,13 +625,36 @@ int Searcher::alpha_beta(Board &board, int depth, int alpha, int beta, Move &bes
             if (pt != WP && pt != WK) { has_pieces = true; break; }
         }
         if (has_pieces) {
-            int R = (depth >= 6) ? 3 : 2;
+            int R = 2 + depth / 4;  // More aggressive reduction: R = 2 + depth/4
+            if (R > depth - 1) R = depth - 1;
             int old_ep = board.make_null_move();
             Move dummy;
             int null_score = -alpha_beta(board, depth - 1 - R, -beta, -beta + 1, dummy, ply + 1);
             board.unmake_null_move(old_ep);
             if (stop_search) return 0;
             if (null_score >= beta) return beta;
+        }
+    }
+
+    // === Static eval for pruning decisions ===
+    int static_eval = 0;
+    bool do_futility = false;
+    if (!in_check_now && ply > 0 && depth <= 3) {
+        static_eval = evaluate(board);
+        // Futility pruning margins: depth 1 = 200, depth 2 = 350, depth 3 = 500
+        static const int futility_margin[] = {0, 200, 350, 500};
+        if (static_eval + futility_margin[depth] <= alpha) {
+            do_futility = true;
+        }
+    }
+
+    // === Razoring: at depth 1-2, if static eval very low, drop into qsearch ===
+    if (!in_check_now && ply > 0 && depth <= 2 && !do_futility) {
+        int razor_margin = (depth == 1) ? 300 : 600;
+        if (static_eval == 0) static_eval = evaluate(board);
+        if (static_eval + razor_margin <= alpha) {
+            int q_score = quiescence(board, alpha, beta);
+            if (q_score <= alpha) return q_score;
         }
     }
 
@@ -649,30 +674,52 @@ int Searcher::alpha_beta(Board &board, int depth, int alpha, int beta, Move &bes
     int moves_searched = 0;
 
     for (auto &m : moves) {
+        bool is_quiet = (m.captured == EMPTY && m.promotion == EMPTY);
+
+        // Futility pruning: skip quiet moves that can't raise alpha
+        if (do_futility && is_quiet && moves_searched > 0 && !in_check_now) {
+            moves_searched++;
+            continue;
+        }
+
         Undo u = board.make_move(m);
         bool gives_check = board.in_check(board.pos.side_to_move);
 
+        // Skip futility-pruned moves that give check (we want to search those)
+        // Re-enable search for checking moves
         int extension = 0;
         if (gives_check) extension = 1;
-        if (in_check_now && moves.size() == 1) extension = 1; // forced reply
+        if (in_check_now && moves.size() == 1) extension = 1;
 
         Move child_best;
         int score;
 
-        // === LMR: Late Move Reductions ===
-        bool is_quiet = (m.captured == EMPTY && m.promotion == EMPTY && !gives_check);
-        if (moves_searched >= 4 && depth >= 3 && is_quiet && !in_check_now) {
-            int reduction = 1;
-            if (moves_searched >= 10) reduction = 2;
-            if (moves_searched >= 20 && depth >= 5) reduction = 3;
-            // Reduced-depth zero-window search
+        // === PVS + LMR ===
+        if (moves_searched == 0) {
+            // First move: full window search
+            score = -alpha_beta(board, depth - 1 + extension, -beta, -alpha, child_best, ply + 1);
+        } else {
+            // LMR for late quiet moves
+            bool use_lmr = (moves_searched >= 3 && depth >= 3 && is_quiet && !in_check_now && !gives_check);
+            int reduction = 0;
+            if (use_lmr) {
+                // Log-based LMR: reduction = sqrt(depth) * sqrt(moveNumber) / 2
+                reduction = 1;
+                if (moves_searched >= 6) reduction = 2;
+                if (moves_searched >= 12 && depth >= 5) reduction = 3;
+                if (moves_searched >= 20 && depth >= 7) reduction = 4;
+                // Don't reduce below 1
+                if (depth - 1 - reduction + extension < 1) reduction = depth - 2 + extension;
+                if (reduction < 0) reduction = 0;
+            }
+
+            // Zero-window search (PVS) with possible LMR
             score = -alpha_beta(board, depth - 1 - reduction + extension, -alpha - 1, -alpha, child_best, ply + 1);
-            // If it beats alpha, re-search at full depth
+
+            // If ZWS fails high, re-search with full window (and full depth if LMR was used)
             if (score > alpha && !stop_search) {
                 score = -alpha_beta(board, depth - 1 + extension, -beta, -alpha, child_best, ply + 1);
             }
-        } else {
-            score = -alpha_beta(board, depth - 1 + extension, -beta, -alpha, child_best, ply + 1);
         }
 
         board.unmake_move(m, u);
@@ -695,7 +742,6 @@ int Searcher::alpha_beta(Board &board, int depth, int alpha, int beta, Move &bes
             if (m.captured == EMPTY) {
                 int side = (int)board.pos.side_to_move;
                 history[side][m.from][m.to] += depth * depth;
-                // Age history to prevent overflow
                 if (history[side][m.from][m.to] > 400000) {
                     for (int s = 0; s < 2; ++s)
                         for (int f = 0; f < 64; ++f)
@@ -923,12 +969,20 @@ Move Searcher::search_bestmove(Board &board, int max_depth, int time_limit_ms) {
 
         int score;
         if (depth >= 4 && !stop_search) {
-            // Aspiration window
-            int window = 50;
+            // Aspiration window — widening
+            int window = 35;
             int a = prev_score - window;
             int b = prev_score + window;
             score = alpha_beta_root(board, depth, a, b, curr_best, root_scores, prev_best);
-            // If outside window, re-search with full window
+            // If outside window, widen and retry
+            if (!stop_search && (score <= a || score >= b)) {
+                window *= 4;
+                a = prev_score - window;
+                b = prev_score + window;
+                root_scores.clear();
+                score = alpha_beta_root(board, depth, a, b, curr_best, root_scores, prev_best);
+            }
+            // Full window fallback
             if (!stop_search && (score <= a || score >= b)) {
                 root_scores.clear();
                 score = alpha_beta_root(board, depth, -INF, INF, curr_best, root_scores, prev_best);
@@ -960,8 +1014,8 @@ Move Searcher::search_bestmove(Board &board, int max_depth, int time_limit_ms) {
         // If we've found a forced mate, stop searching
         if (score >= MATE_SCORE - 100 || score <= -MATE_SCORE + 100) break;
 
-        // Don't start a new iteration if we've used > 50% of time
-        if (elapsed > time_limit_ms / 2) break;
+        // Don't start a new iteration if we've used > 40% of time (save for deeper search)
+        if (elapsed > time_limit_ms * 2 / 5) break;
     }
 
     // === OPENING VARIETY ===

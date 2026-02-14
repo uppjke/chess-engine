@@ -175,7 +175,7 @@ struct HashKeys {
 
 enum TTFlag : uint8_t { TT_EXACT = 0, TT_ALPHA = 1, TT_BETA = 2 };
 
-static constexpr int TT_SIZE = 1 << 20; // ~1M entries
+static constexpr int TT_SIZE = 1 << 22; // ~4M entries
 static constexpr int TT_MASK = TT_SIZE - 1;
 
 struct TTEntry {
