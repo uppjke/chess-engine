@@ -292,6 +292,77 @@ static int evaluate_king_safety(const Board &board, int wk_sq, int bk_sq,
         }
     }
 
+    // === BACK-RANK MATE VULNERABILITY ===
+    // Detect when king is trapped on back rank with no escape squares
+    if (wk_sq != -1 && !is_endgame) {
+        int wkr = rank_of(wk_sq), wkf = file_of(wk_sq);
+        if (wkr == 0) {
+            // King on rank 1: check if all escape squares on rank 2 are blocked
+            bool has_escape = false;
+            for (int df = -1; df <= 1; ++df) {
+                int ef = wkf + df;
+                if (ef < 0 || ef > 7) continue;
+                int escape_sq = make_sq(ef, 1);
+                int p = pos.board[escape_sq];
+                // Escape exists if square is empty or has enemy piece and is not attacked
+                if (p == EMPTY || is_black((Piece)p)) {
+                    has_escape = true;
+                    break;
+                }
+            }
+            if (!has_escape) {
+                // King is trapped on back rank — check if opponent has rook/queen
+                bool enemy_has_heavy = false;
+                for (int sq = 0; sq < 64; ++sq) {
+                    int p = pos.board[sq];
+                    if (p == BR || p == BQ) { enemy_has_heavy = true; break; }
+                }
+                if (enemy_has_heavy) {
+                    safety -= 150;  // Severe back-rank weakness
+                    // Extra penalty if opponent has both rook and queen
+                    bool has_rook = false, has_queen = false;
+                    for (int sq = 0; sq < 64; ++sq) {
+                        if (pos.board[sq] == BR) has_rook = true;
+                        if (pos.board[sq] == BQ) has_queen = true;
+                    }
+                    if (has_rook && has_queen) safety -= 100;
+                }
+            }
+        }
+    }
+    if (bk_sq != -1 && !is_endgame) {
+        int bkr = rank_of(bk_sq), bkf = file_of(bk_sq);
+        if (bkr == 7) {
+            bool has_escape = false;
+            for (int df = -1; df <= 1; ++df) {
+                int ef = bkf + df;
+                if (ef < 0 || ef > 7) continue;
+                int escape_sq = make_sq(ef, 6);
+                int p = pos.board[escape_sq];
+                if (p == EMPTY || is_white((Piece)p)) {
+                    has_escape = true;
+                    break;
+                }
+            }
+            if (!has_escape) {
+                bool enemy_has_heavy = false;
+                for (int sq = 0; sq < 64; ++sq) {
+                    int p = pos.board[sq];
+                    if (p == WR || p == WQ) { enemy_has_heavy = true; break; }
+                }
+                if (enemy_has_heavy) {
+                    safety += 150;
+                    bool has_rook = false, has_queen = false;
+                    for (int sq = 0; sq < 64; ++sq) {
+                        if (pos.board[sq] == WR) has_rook = true;
+                        if (pos.board[sq] == WQ) has_queen = true;
+                    }
+                    if (has_rook && has_queen) safety += 100;
+                }
+            }
+        }
+    }
+
     return safety;
 }
 

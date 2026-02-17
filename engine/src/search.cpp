@@ -484,9 +484,13 @@ int Searcher::alpha_beta(Board &board, int depth, int alpha, int beta, Move &bes
     }
 
     // === Reverse Futility Pruning (Static Null Move Pruning) ===
+    // Skip when static eval is not reliable (e.g. king safety is very poor)
     if (!in_check_now && ply > 0 && depth <= 6 && eval_computed) {
         int rfp_margin = depth * 80;
-        if (static_eval - rfp_margin >= beta) return static_eval;
+        // Don't prune if eval is close to mate territory
+        if (static_eval - rfp_margin >= beta && static_eval < MATE_SCORE - 500 && static_eval > -MATE_SCORE + 500) {
+            return static_eval;
+        }
     }
 
     // === Null Move Pruning ===
@@ -517,9 +521,12 @@ int Searcher::alpha_beta(Board &board, int depth, int alpha, int beta, Move &bes
     // === Futility / Razoring ===
     bool do_futility = false;
     if (!in_check_now && ply > 0 && depth <= 3 && eval_computed) {
-        static const int futility_margin[] = {0, 200, 350, 500};
-        if (static_eval + futility_margin[depth] <= alpha) {
-            do_futility = true;
+        // Don't apply futility pruning if eval suggests possible mate threats
+        if (alpha > -MATE_SCORE + 500 && beta < MATE_SCORE - 500) {
+            static const int futility_margin[] = {0, 200, 350, 500};
+            if (static_eval + futility_margin[depth] <= alpha) {
+                do_futility = true;
+            }
         }
     }
 
